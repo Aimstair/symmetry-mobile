@@ -66,7 +66,10 @@ export const GlassCard = React.forwardRef<React.ElementRef<typeof View>, GlassCa
 
     if (onPress) {
       return (
-        <Pressable onPress={onPress} className={({ pressed }) => pressed ? 'opacity-90' : ''}>
+        <Pressable 
+          onPress={onPress} 
+          style={({ pressed }) => pressed ? { opacity: 0.9 } : undefined}
+        >
           {content}
         </Pressable>
       );

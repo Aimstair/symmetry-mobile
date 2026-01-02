@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/modal';
+import { ExerciseDetailSheet } from '@/components/ui/workout/ExerciseDetailSheet';
 import { 
   ChevronLeft, 
   Timer, 
@@ -22,6 +23,8 @@ import {
   Calculator,
   SkipForward,
   Flame,
+  Dumbbell,
+  ChevronRight,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 
@@ -103,6 +106,10 @@ export default function ActiveWorkout() {
   const [calcWeight, setCalcWeight] = useState('');
   const [unit, setUnit] = useState<'kg' | 'lbs'>('kg');
   const [showMenu, setShowMenu] = useState(false);
+  const [selectedExercise, setSelectedExercise] = useState<ExerciseData | null>(null);
+  const [showExerciseDetail, setShowExerciseDetail] = useState(false);
+  const [historyExerciseId, setHistoryExerciseId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   // Session timer
   useEffect(() => {
@@ -170,6 +177,26 @@ export default function ActiveWorkout() {
     );
   };
 
+  const handleSwapExercise = (exerciseId: string, newExerciseId: string, newName: string) => {
+    setExercises((prev) =>
+      prev.map((ex) =>
+        ex.id === exerciseId
+          ? { ...ex, name: newName, id: newExerciseId }
+          : ex
+      )
+    );
+  };
+
+  const handleViewHistory = (exerciseId: string) => {
+    setHistoryExerciseId(exerciseId);
+    setShowHistory(true);
+  };
+
+  const openExerciseDetail = (exercise: ExerciseData) => {
+    setSelectedExercise(exercise);
+    setShowExerciseDetail(true);
+  };
+
   const calculatePlates = (targetWeight: number, barWeight: number = unit === 'kg' ? 20 : 45) => {
     const platesKg = [25, 20, 15, 10, 5, 2.5, 1.25];
     const platesLbs = [45, 35, 25, 10, 5, 2.5];
@@ -222,7 +249,7 @@ export default function ActiveWorkout() {
       <View className="border-b border-border bg-card">
         <View className="flex-row items-center justify-between px-4 py-3">
           <Pressable 
-            onPress={() => router.back()}
+            onPress={() => router.replace('/(tabs)/workout-plan')}
             className="p-2 -ml-2"
             style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
           >
@@ -262,8 +289,12 @@ export default function ActiveWorkout() {
                 )}
                 
                 <GlassCard className="overflow-hidden p-0">
-                  {/* Exercise Header */}
-                  <View className="flex-row items-center justify-between p-4 border-b border-border/50">
+                  {/* Exercise Header - Pressable */}
+                  <Pressable 
+                    className="flex-row items-center justify-between p-4 border-b border-border/50"
+                    onPress={() => openExerciseDetail(exercise)}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1, backgroundColor: pressed ? 'rgba(255,255,255,0.02)' : 'transparent' })}
+                  >
                     <View className="flex-row items-center gap-3 flex-1">
                       {isSuperset && (
                         <View className="w-1 h-8 rounded-full bg-primary" />
@@ -275,7 +306,11 @@ export default function ActiveWorkout() {
                         </Text>
                       </View>
                     </View>
-                  </View>
+                    <View className="flex-row items-center gap-2">
+                      <Text className="text-xs text-primary">Details</Text>
+                      <ChevronRight size={16} color="#31D5E3" />
+                    </View>
+                  </Pressable>
 
                   {/* Sets Table Header */}
                   <View className="flex-row px-4 py-2 bg-muted/30 border-b border-border/30">
@@ -342,6 +377,8 @@ export default function ActiveWorkout() {
                           className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
                           placeholder={String(deloadMode ? Math.round((set.prevWeight || 0) * 0.6) : set.prevWeight)}
                           placeholderTextColor="#71717A"
+                          textAlignVertical="center"
+                          style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                         />
                       </View>
                       <View className="w-[20%]">
@@ -387,7 +424,7 @@ export default function ActiveWorkout() {
       {/* Finish Button */}
       <View className="absolute bottom-4 left-4 right-4">
         <Button 
-          onPress={() => router.back()}
+          onPress={() => router.replace('/(tabs)/workout-plan')}
           className="w-full bg-primary h-12"
         >
           <Flame size={20} color="#FFFFFF" />
@@ -553,6 +590,20 @@ export default function ActiveWorkout() {
           </View>
         </DialogContent>
       </Dialog>
+
+      {/* Exercise Detail Sheet */}
+      <ExerciseDetailSheet
+        exercise={selectedExercise}
+        isOpen={showExerciseDetail}
+        onClose={() => setShowExerciseDetail(false)}
+        onSetComplete={handleSetComplete}
+        onInputChange={handleInputChange}
+        onSwapExercise={handleSwapExercise}
+        onViewHistory={handleViewHistory}
+        elapsedTime={elapsedTime}
+        unit={unit}
+        deloadMode={deloadMode}
+      />
     </SafeAreaView>
   );
 }

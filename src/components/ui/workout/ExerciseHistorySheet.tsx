@@ -1,4 +1,4 @@
-import { View, Text, Modal, Pressable, ScrollView } from 'react-native';
+import { View, Text, Modal, Pressable, ScrollView, Dimensions } from 'react-native';
 import { GlassCard } from '@/components/ui/GlassCard';
 import {
   TrendingUp,
@@ -11,6 +11,11 @@ import {
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
+
+// Get screen width to calculate chart width dynamically
+const { width } = Dimensions.get('window');
+// Screen width - (Screen Padding * 2) - (Card Padding * 2)
+const chartWidth = width - 32 - 32;
 
 // Mock history data
 const exerciseHistoryData: Record<string, {
@@ -108,6 +113,18 @@ export function ExerciseHistorySheet({
         <Pressable className="flex-1" onPress={onClose} />
         
         <View className="h-[85%] bg-background rounded-t-3xl border-t border-border overflow-hidden">
+          {/* Sticky Header */}
+          <View className="border-b border-border bg-card p-4">
+            <View className="flex-row items-center justify-between">
+              <Text className="text-lg font-bold text-foreground">{history.name}</Text>
+              <Pressable onPress={onClose} className="p-2">
+                <X size={20} color="#A1A1AA" />
+              </Pressable>
+            </View>
+          </View>
+
+          <ScrollView className="flex-1">
+            <View className="p-4 gap-4 pb-8">
               {/* Stats Summary */}
               <View className="flex-row gap-3">
                 <GlassCard className="flex-1 items-center">
@@ -145,24 +162,18 @@ export function ExerciseHistorySheet({
                     </>
                   )}
                 </GlassCard>
-              </View   )}>
-                    {progress.isPositive ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-                    {progress.value}
-                  </p>
-                  <p className="text-xs text-muted-foreground">Last Δ ({unit})</p>
-                </>
-              ) : (
-                <>
-                  <Minus className="w-5 h-5 mx-auto text-muted-foreground" />
+              </View>
+
               {/* Weight Progress Chart */}
               <GlassCard>
-                <View className="flex-row items-center gap-2 mb-3">
+                <View className="flex-row items-center gap-2 mb-7">
                   <Dumbbell size={16} color="#31D5E3" />
                   <Text className="font-semibold text-sm text-foreground">Weight Progress</Text>
                 </View>
-                <View className="h-48">
+                <View className="items-center pb-0">
                   <LineChart
                     data={weightChartData}
+                    width={chartWidth}
                     areaChart
                     curved
                     height={180}
@@ -186,35 +197,18 @@ export function ExerciseHistorySheet({
                     noOfSections={4}
                   />
                 </View>
-                        strokeWidth={2}
-                    fill="url(#weightGradient)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </GlassCard>
+              </GlassCard>
 
-          {/* Volume Chart */}
-          <GlassCard>
-            <h4 className="font-semibold text-sm mb-3 flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-success" />
-              Volume Progress
-            </h4>
-            <div className="h-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 0, right: 0, left: -10, bottom: -15 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis 
-                    dataKey="date" 
               {/* Volume Chart */}
               <GlassCard>
-                <View className="flex-row items-center gap-2 mb-3">
+                <View className="flex-row items-center gap-2 mb-7">
                   <TrendingUp size={16} color="#4ADE80" />
                   <Text className="font-semibold text-sm text-foreground">Volume Progress</Text>
                 </View>
-                <View className="h-48">
+                <View className="items-center pb-0">
                   <LineChart
                     data={volumeChartData}
+                    width={chartWidth}
                     curved
                     height={180}
                     spacing={volumeChartData.length > 4 ? 50 : 70}
@@ -233,24 +227,8 @@ export function ExerciseHistorySheet({
                     noOfSections={4}
                   />
                 </View>
-                        <span className="font-medium text-sm">{session.date}</span>
-                    <span className="text-xs text-muted-foreground">{session.sets.length} sets</span>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {session.sets.map((set, j) => (
-                      <span key={j} className="px-2 py-1 text-xs bg-muted/50 rounded">
-                        {convertWeight(set.weight)} × {set.reps}
-                      </span>
-                    ))}
-                  </div>
-                </GlassCard>
-              ))}
-            </div>
-          </div>
+              </GlassCard>
 
-          {/* Personal Record */}
-          <GlassCard variant="glow" glowColor="success">
-            <div className="text-center">
               {/* Session History */}
               <View>
                 <View className="flex-row items-center gap-2 mb-3">
@@ -276,7 +254,9 @@ export function ExerciseHistorySheet({
                     </GlassCard>
                   ))}
                 </View>
-              </View    {/* Personal Record */}
+              </View>
+
+              {/* Personal Record */}
               <GlassCard className="border-2 border-success/30">
                 <View className="items-center">
                   <Text className="text-xs text-success uppercase tracking-wide mb-1">Personal Record</Text>
@@ -290,4 +270,6 @@ export function ExerciseHistorySheet({
           </ScrollView>
         </View>
       </View>
-    </Modal
+    </Modal>
+  );
+}

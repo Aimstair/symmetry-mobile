@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState } from 'react';
-import { View, Text, Pressable, ScrollView } from 'react-native';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { View, Text, Pressable, ScrollView, Animated } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { cn } from '@/lib/utils';
 
 interface TabsContextValue {
@@ -64,17 +65,24 @@ export function TabsTrigger({ value, children, className }: TabsTriggerProps) {
     <Pressable
       onPress={() => onValueChange(value)}
       className={cn(
-        'flex-1 py-2 px-3 rounded-md items-center justify-center',
-        isActive ? 'bg-background' : 'bg-transparent',
+        'flex-1 py-2 px-3 rounded-xl items-center justify-center overflow-hidden',
         className
       )}
       style={({ pressed }) => ({
         opacity: pressed ? 0.7 : 1,
       })}
     >
+      {isActive ? (
+        <LinearGradient
+          colors={['#31D5E3', '#1E90B8']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          className="absolute inset-0 rounded-xl"
+        />
+      ) : null}
       <Text className={cn(
-        'text-sm font-medium',
-        isActive ? 'text-foreground' : 'text-muted-foreground'
+        'text-sm font-medium z-10',
+        isActive ? 'text-white' : 'text-muted-foreground'
       )}>
         {children}
       </Text>
@@ -90,14 +98,41 @@ interface TabsContentProps {
 
 export function TabsContent({ value, children, className }: TabsContentProps) {
   const { value: selectedValue } = useTabsContext();
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(20)).current;
+
+  useEffect(() => {
+    if (selectedValue === value) {
+      fadeAnim.setValue(0);
+      slideAnim.setValue(20);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [selectedValue, value, fadeAnim, slideAnim]);
 
   if (selectedValue !== value) {
     return null;
   }
 
   return (
-    <View className={className}>
+    <Animated.View 
+      className={className}
+      style={{
+        opacity: fadeAnim,
+        transform: [{ translateY: slideAnim }],
+      }}
+    >
       {children}
-    </View>
+    </Animated.View>
   );
 }

@@ -1,6 +1,6 @@
 import { Tabs } from 'expo-router';
 import { View } from 'react-native';
-import { Home, Dumbbell, TrendingUp, Settings } from 'lucide-react-native';
+import { Home, Dumbbell, TrendingUp, Settings, Scan } from 'lucide-react-native';
 
 /**
  * Bottom Tab Navigation
@@ -23,8 +23,8 @@ export default function TabLayout() {
         headerShown: false,
         tabBarStyle: {
           backgroundColor: 'hsl(240, 10%, 6%)',
-          borderTopColor: 'hsl(240, 5%, 14%)',
-          borderTopWidth: 1,
+          borderTopColor: 'rgb(121, 68, 103)',
+          borderTopWidth: 0.2,
           height: 60,
           paddingBottom: 8,
           paddingTop: 8,
@@ -49,6 +49,13 @@ export default function TabLayout() {
         options={{
           title: 'Workout',
           tabBarIcon: ({ color, size }) => <Dumbbell color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="physique-scan"
+        options={{
+          title: 'Scan',
+          tabBarIcon: ({ color, size }) => <Scan color={color} size={size} />,
         }}
       />
       <Tabs.Screen

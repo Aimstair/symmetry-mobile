@@ -22,7 +22,8 @@
         "NSPhotoLibraryUsageDescription": "We need photo library access to save your progress photos.",
         "UIBackgroundModes": ["audio"]
       },
-      "buildNumber": "1"
+      "buildNumber": "1",
+      "newArchEnabled": true
     },
     "android": {
       "adaptiveIcon": {
@@ -35,7 +36,8 @@
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE"
-      ]
+      ],
+      "newArchEnabled": true
     },
     "web": {
       "favicon": "./assets/favicon.png",

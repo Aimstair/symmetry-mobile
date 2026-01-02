@@ -1,7 +1,7 @@
 import * as React from 'react';
-import { View, Text, ScrollView, Pressable } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useAppStore } from '@/store/useAppStore';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { CircularProgress } from '@/components/ui/CircularProgress';
@@ -32,6 +32,36 @@ import {
 
 export default function Dashboard() {
   const { user, nutritionTargets, workoutPlans } = useAppStore();
+  const headerAnim = React.useRef(new Animated.Value(0)).current;
+  const card1Anim = React.useRef(new Animated.Value(0)).current;
+  const card2Anim = React.useRef(new Animated.Value(0)).current;
+  const card3Anim = React.useRef(new Animated.Value(0)).current;
+  const card4Anim = React.useRef(new Animated.Value(0)).current;
+
+  useFocusEffect(
+    React.useCallback(() => {
+      headerAnim.setValue(0);
+      card1Anim.setValue(0);
+      card2Anim.setValue(0);
+      card3Anim.setValue(0);
+      card4Anim.setValue(0);
+      
+      Animated.stagger(100, [
+        Animated.parallel([
+          Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        ]),
+        Animated.timing(card1Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(card2Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(card3Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(card4Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]).start();
+    }, [headerAnim, card1Anim, card2Anim, card3Anim, card4Anim])
+  );
+
+  const createAnimStyle = (anim: Animated.Value) => ({
+    opacity: anim,
+    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+  });
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -61,18 +91,18 @@ export default function Dashboard() {
     <SafeAreaView className="flex-1 bg-background" edges={['top']}>
       <ScrollView className="flex-1 px-4 py-6">
         {/* Header */}
-        <View className="mb-8">
+        <Animated.View style={createAnimStyle(headerAnim)} className="mb-8">
           <Text className="text-sm text-muted-foreground font-medium">
             {getGreeting()}
           </Text>
           <Text className="text-3xl font-bold mt-1 text-primary">
             {user?.name || 'Athlete'}
           </Text>
-        </View>
+        </Animated.View>
 
         {/* Missed Workout Banner */}
         {hasMissedWorkout && (
-          <View className="mb-4">
+          <Animated.View style={createAnimStyle(card1Anim)} className="mb-4">
             <GlassCard variant="glow" glowColor="warning" className="flex-row items-center gap-3">
               <View className="w-10 h-10 rounded-full bg-warning/20 flex items-center justify-center">
                 <AlertTriangle size={20} color="#F59E0B" />
@@ -93,11 +123,11 @@ export default function Dashboard() {
                 <Text className="text-warning">Shift</Text>
               </Button>
             </GlassCard>
-          </View>
+          </Animated.View>
         )}
 
         {/* Daily Macros */}
-        <View className="mb-6">
+        <Animated.View style={createAnimStyle(card1Anim)} className="mb-6">
           <View className="flex-row items-center justify-between mb-3">
             <View className="flex-row items-center gap-2">
               <Flame size={16} color="#31D5E3" />
@@ -137,10 +167,10 @@ export default function Dashboard() {
               />
             </View>
           </GlassCard>
-        </View>
+        </Animated.View>
 
         {/* Today's Mission */}
-        <View className="mb-6">
+        <Animated.View style={createAnimStyle(card2Anim)} className="mb-6">
           <View className="flex-row items-center justify-between mb-3">
             <View className="flex-row items-center gap-2">
               <Dumbbell size={16} color="#31D5E3" />
@@ -189,10 +219,10 @@ export default function Dashboard() {
               </View>
             </Button>
           </GlassCard>
-        </View>
+        </Animated.View>
 
         {/* Quick Stats */}
-        <View className="mb-6">
+        <Animated.View style={createAnimStyle(card3Anim)} className="mb-6">
           <View className="flex-row items-center justify-between mb-3">
             <View className="flex-row items-center gap-2">
               <Calendar size={16} color="#31D5E3" />
@@ -221,10 +251,10 @@ export default function Dashboard() {
               </GlassCard>
             </View>
           </View>
-        </View>
+        </Animated.View>
 
         {/* Symmetry Score Teaser */}
-        <View className="mb-6">
+        <Animated.View style={createAnimStyle(card4Anim)} className="mb-6">
           <GlassCard onPress={() => router.push('/physique-scan')} className="relative overflow-hidden">
             <View className="flex-row items-center justify-between">
               <View className="flex-1">
@@ -243,7 +273,7 @@ export default function Dashboard() {
               </View>
             </View>
           </GlassCard>
-        </View>
+        </Animated.View>
       </ScrollView>
     </SafeAreaView>
   );

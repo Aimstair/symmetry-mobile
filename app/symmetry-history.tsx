@@ -256,10 +256,53 @@ export default function SymmetryHistory() {
                     <Text className="text-lg font-semibold text-foreground">Score Progress</Text>
                   </View>
                 </View>
-                <GlassCard>
-                  <View className="h-52 items-center justify-center">
-                    <Text className="text-muted-foreground text-sm">Chart temporarily disabled</Text>
-                    {/* TODO: Replace with react-native-gifted-charts */}
+                <GlassCard className="p-0 overflow-hidden pb-4">
+                  <View className="items-center justify-center pt-4">
+                    <LineChart
+                      data={symmetryHistory.map(d => ({ value: d.score, label: d.date }))}
+                      curved
+                      areaChart
+                      height={200}
+                      width={chartWidth}
+                      spacing={45}
+                      initialSpacing={15}
+                      color="#31D5E3"
+                      thickness={3}
+                      startFillColor="#31D5E3"
+                      endFillColor="#31D5E3"
+                      startOpacity={0.4}
+                      endOpacity={0.05}
+                      dataPointsColor="#31D5E3"
+                      dataPointsRadius={6}
+                      hideDataPoints={false}
+                      yAxisColor="#27272A"
+                      xAxisColor="#27272A"
+                      yAxisTextStyle={{ color: '#A1A1AA', fontSize: 11 }}
+                      xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                      rulesType="solid"
+                      rulesColor="#27272A"
+                      noOfSections={5}
+                      backgroundColor="transparent"
+                      pointerConfig={{
+                        pointerStripHeight: 180,
+                        pointerStripColor: '#31D5E3',
+                        pointerStripWidth: 2,
+                        pointerColor: '#31D5E3',
+                        radius: 7,
+                        pointerLabelWidth: 110,
+                        pointerLabelHeight: 90,
+                        activatePointersOnLongPress: true,
+                        autoAdjustPointerLabelPosition: false,
+                        pointerLabelComponent: (items: any) => {
+                          return (
+                            <View className="bg-card border border-primary rounded-lg px-3 py-2">
+                              <Text className="text-sm text-primary font-bold">Score: {items[0].value}</Text>
+                              <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
+                            </View>
+                          );
+                        },
+                      }}
+                    />
                   </View>
                 </GlassCard>
               </View>
@@ -318,8 +361,25 @@ export default function SymmetryHistory() {
                     </Text>
                   </View>
                   <GlassCard className="py-3">
-                    <View className="h-24 items-center justify-center">
-                      <Text className="text-muted-foreground text-xs">Chart disabled</Text>
+                    <View className="h-24">
+                      <LineChart
+                        data={data.map(d => ({ value: d.score }))} 
+                        curved
+                        areaChart
+                        height={80}
+                        width={chartWidth - 40}
+                        spacing={data.length > 3 ? 60 : 80}
+                        initialSpacing={10}
+                        color="#31D5E3"
+                        thickness={2}
+                        startFillColor="#31D5E3"
+                        endFillColor="#31D5E3"
+                        startOpacity={0.2}
+                        endOpacity={0.02}
+                        hideDataPoints
+                        hideAxesAndRules
+                        backgroundColor="transparent"
+                      />
                     </View>
                   </GlassCard>
                 </View>

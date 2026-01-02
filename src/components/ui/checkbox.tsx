@@ -33,9 +33,9 @@ const Checkbox = React.forwardRef<View, CheckboxProps>(
       <Pressable
         onPress={handlePress}
         disabled={disabled}
-        className={({ pressed }) => 
-          cn(pressed && !disabled && 'opacity-70')
-        }
+        style={({ pressed }) => ({
+          opacity: pressed && !disabled ? 0.7 : 1
+        })}
       >
         <View
           ref={ref}
@@ -43,7 +43,7 @@ const Checkbox = React.forwardRef<View, CheckboxProps>(
             'h-5 w-5 rounded border border-primary flex items-center justify-center',
             checked && 'bg-primary',
             disabled && 'opacity-50',
-            className
+            className || ''
           )}
           {...props}
         >

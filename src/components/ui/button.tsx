@@ -81,50 +81,51 @@ const Button = React.forwardRef<React.ElementRef<typeof Pressable>, ButtonProps>
     ref
   ) => {
     const isDisabled = disabled || loading;
+    
+    // Compute base className string
+    const baseClassName = cn(
+      buttonVariants({ variant, size }),
+      className
+    );
 
     return (
       <Pressable
         ref={ref}
         disabled={isDisabled}
-        className={({ pressed }) =>
-          cn(
-            buttonVariants({ variant, size }),
-            pressed && !isDisabled && 'opacity-70',
-            className
-          )
-        }
+        className={baseClassName}
+        style={({ pressed }) => [
+          pressed && !isDisabled && { opacity: 0.7 }
+        ]}
         android_ripple={{
           color: 'rgba(255, 255, 255, 0.1)',
           borderless: false,
         }}
         {...props}
       >
-        {({ pressed }) => (
-          <View className="flex-row items-center justify-center gap-2">
-            {loading && (
-              <ActivityIndicator
-                size="small"
-                color={variant === 'default' ? '#FFFFFF' : undefined}
-                className="mr-1"
-              />
-            )}
-            {!loading && leftIcon && <View>{leftIcon}</View>}
-            {typeof children === 'string' ? (
-              <Text
-                className={cn(
-                  buttonTextVariants({ variant }),
-                  size === 'sm' && 'text-xs',
-                  size === 'lg' && 'text-base'
-                )}
-              >
-                {children}
-              </Text>
-            ) : (
-              children
-            )}
-            {!loading && rightIcon && <View>{rightIcon}</View>}
-          </View>
-        )}
+        <View className="flex-row items-center justify-center gap-2">
+          {loading && (
+            <ActivityIndicator
+              size="small"
+              color={variant === 'default' ? '#FFFFFF' : undefined}
+              className="mr-1"
+            />
+          )}
+          {!loading && leftIcon && <View>{leftIcon}</View>}
+          {typeof children === 'string' ? (
+            <Text
+              className={cn(
+                buttonTextVariants({ variant }),
+                size === 'sm' && 'text-xs',
+                size === 'lg' && 'text-base'
+              )}
+            >
+              {children}
+            </Text>
+          ) : (
+            children
+          )}
+          {!loading && rightIcon && <View>{rightIcon}</View>}
+        </View>
       </Pressable>
     );
   }

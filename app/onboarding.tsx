@@ -75,7 +75,7 @@ export default function Onboarding() {
     experience: '' as 'beginner' | 'intermediate' | 'advanced' | '',
     goal: '' as 'bulk' | 'cut' | 'maintain' | 'recomp' | '',
     equipment: '' as 'gym' | 'home' | '',
-    frequency: 4 as 3 | 4 | 5 | 6,
+    frequency: 7 as 1 | 2 | 3 | 4 | 5 | 6 | 7,
     selectedDays: [] as string[],
     biometricConsent: false,
     ageVerified: false,
@@ -118,7 +118,7 @@ export default function Onboarding() {
         updatedAt: new Date(),
       });
       completeOnboarding();
-      router.replace('/(tabs)');
+      router.push('/(tabs)');
     }
   };
 
@@ -227,7 +227,12 @@ export default function Onboarding() {
                             )}
                             onPress={() => setFormData({ ...formData, gender: g })}
                           >
-                            {g.charAt(0).toUpperCase() + g.slice(1)}
+                            <Text className={cn(
+                              'font-semibold',
+                              formData.gender === g ? 'text-primary-foreground' : 'text-foreground'
+                            )}>
+                              {g.charAt(0).toUpperCase() + g.slice(1)}
+                            </Text>
                           </Button>
                         </View>
                       ))}
@@ -374,7 +379,7 @@ export default function Onboarding() {
                   <View>
                     <Label className="mb-3">Days per week</Label>
                     <View className="flex-row gap-2">
-                      {([3, 4, 5, 6] as const).map((num) => (
+                      {([1, 2, 3, 4, 5, 6, 7] as const).map((num) => (
                         <View key={num} className="flex-1">
                           <Button
                             variant={formData.frequency === num ? 'default' : 'outline'}
@@ -386,7 +391,12 @@ export default function Onboarding() {
                               setFormData({ ...formData, frequency: num, selectedDays: [] })
                             }
                           >
-                            {num}
+                            <Text className={cn(
+                              'font-semibold',
+                              formData.frequency === num ? 'text-primary-foreground' : 'text-foreground'
+                            )}>
+                              {num}
+                            </Text>
                           </Button>
                         </View>
                       ))}
@@ -397,27 +407,32 @@ export default function Onboarding() {
                     <Label className="mb-3">
                       Select {formData.frequency} training days
                     </Label>
-                    <View className="flex-row flex-wrap gap-2">
-                      {days.map((day) => (
-                        <View key={day} className="w-[48%]">
-                          <Button
-                            variant={
-                              formData.selectedDays.includes(day) ? 'default' : 'outline'
-                            }
-                            className={cn(
-                              'w-full',
-                              formData.selectedDays.includes(day) && 'bg-primary'
-                            )}
-                            onPress={() => handleDayToggle(day)}
-                            disabled={
-                              !formData.selectedDays.includes(day) &&
-                              formData.selectedDays.length >= formData.frequency
-                            }
-                          >
-                            {day.slice(0, 3)}
-                          </Button>
-                        </View>
-                      ))}
+                    <View className="flex-row flex-wrap gap-4 justify-center">
+                      {days.map((day) => {
+                        const isSelected = formData.selectedDays.includes(day);
+                        const isDisabled = !isSelected && formData.selectedDays.length >= formData.frequency;
+                        return (
+                          <View key={day} className="w-[48%]">
+                            <Button
+                              variant={isSelected ? 'default' : 'outline'}
+                              className={cn(
+                                'w-full',
+                                isSelected && 'bg-primary',
+                                !isDisabled && 'opacity-100'
+                              )}
+                              onPress={() => handleDayToggle(day)}
+                              disabled={isDisabled}
+                            >
+                              <Text className={cn(
+                                'font-semibold',
+                                isSelected ? 'text-primary-foreground' : 'text-foreground'
+                              )}>
+                                {day.slice(0, 3)}
+                              </Text>
+                            </Button>
+                          </View>
+                        );
+                      })}
                     </View>
                     <Text className="text-xs text-muted-foreground mt-2 text-center">
                       {formData.selectedDays.length} of {formData.frequency} selected
@@ -438,7 +453,7 @@ export default function Onboarding() {
                 </Text>
 
                 <View className="gap-4">
-                  <GlassCard className="gap-4">
+                  <GlassCard className="gap-6">
                     <View className="flex-row items-start gap-3">
                       <Checkbox
                         checked={formData.biometricConsent}
@@ -506,7 +521,7 @@ export default function Onboarding() {
                     className="w-full"
                     leftIcon={<ChevronLeft size={16} color="#FAFAFA" />}
                   >
-                    Back
+                    <Text className="text-foreground font-semibold">Back</Text>
                   </Button>
                 </View>
               )}
@@ -514,11 +529,19 @@ export default function Onboarding() {
                 <Button
                   onPress={handleNext}
                   disabled={!canProceed()}
-                  className={cn('w-full bg-primary')}
-                  leftIcon={step === 5 ? <Sparkles size={16} color="#0A0A0F" /> : undefined}
-                  rightIcon={step !== 5 ? <ChevronRight size={16} color="#0A0A0F" /> : undefined}
+                  className={cn(
+                    'w-full',
+                    canProceed() ? 'bg-primary opacity-100' : 'bg-muted opacity-50'
+                  )}
+                  leftIcon={step === 5 ? <Sparkles size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
+                  rightIcon={step !== 5 ? <ChevronRight size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
                 >
-                  {step === 5 ? 'Start Training' : 'Continue'}
+                  <Text className={cn(
+                    'font-semibold',
+                    canProceed() ? 'text-primary-foreground' : 'text-muted-foreground'
+                  )}>
+                    {step === 5 ? 'Start Training' : 'Continue'}
+                  </Text>
                 </Button>
               </View>
             </View>

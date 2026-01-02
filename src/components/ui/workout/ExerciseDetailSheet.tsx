@@ -184,37 +184,40 @@ export function ExerciseDetailSheet({
               <View className="flex-row items-center gap-2 mr-2">
                 <Timer size={16} color="#31D5E3" />
                 <Text className="font-mono font-bold text-foreground">{formatTime(elapsedTime)}</Text>
-              {/* Video Placeholder */}
+              </View>
+              <Pressable onPress={onClose} className="p-2">
+                <X size={20} color="#A1A1AA" />
+              </Pressable>
+            </View>
+          </View>
+  
+          <ScrollView className="flex-1">
+            <View className="p-4 gap-4 pb-8">
+              {/* Video/Animation Placeholder */}
               <GlassCard className="overflow-hidden p-0">
                 <View className="bg-muted/50 items-center justify-center relative" style={{ aspectRatio: 16/9 }}>
-                  <View className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent" />
                   <View className="w-24 h-24 rounded-full bg-primary/20 items-center justify-center">
                     <Play size={40} color="#31D5E3" style={{ marginLeft: 4 }} />
                   </View>
                   <Text className="text-sm text-muted-foreground mt-3">Tap to play form video</Text>
                 </View>
-  
-          <ScrollView className="flex-1">
-            <View className="p-4 gap-4 pb-8">
-            {/* Video/Animation Placeholder */}
-            <GlassCard noPadding className="overflow-hidden">
-              <div className="aspect-video bg-muted/50 flex flex-col items-center justify-center relative">
-                <div className="absolute inset-0 bg-gradient-to-t from-background/80 to-transparent" />
-                <motion.div
-                  className="w-24 h-24 rounded-full bg-primary/20 flex items-center justify-center"
-                  animate={{ scale: [1, 1.05, 1] }}
-                  transition={{ duration: 2, repeat: Infinity }}
-                >
-                  <Play className="w-10 h-10 text-primary ml-1" />
-                </motion.div>
-                <p className="text-sm text-muted-foreground mt-3 relative z-10">Tap to play form video</p>
-              </div>
-            </GlassCard>
+              </GlassCard>
 
-            {/* Form Cues */}
-            <GlassCard>
-              <h4 className="font-semibold text-sm mb-3 flex items-center gap-2">
-                <Target className="w-4 h-4 text-primary" />
+              {/* Muscle Groups */}
+              <GlassCard>
+                <View className="flex-row items-center gap-2 mb-3">
+                  <Target size={16} color="#31D5E3" />
+                  <Text className="font-semibold text-sm text-foreground">Muscles Targeted</Text>
+                </View>
+                <View className="flex-row flex-wrap gap-2">
+                  {details.muscleGroups.map((muscle, i) => (
+                    <View key={i} className="px-3 py-1 bg-primary/10 rounded-full">
+                      <Text className="text-xs text-primary">{muscle}</Text>
+                    </View>
+                  ))}
+                </View>
+              </GlassCard>
+
               {/* Form Cues */}
               <GlassCard>
                 <View className="flex-row items-center gap-2 mb-3">
@@ -228,8 +231,8 @@ export function ExerciseDetailSheet({
                     </View>
                   ))}
                 </View>
-                <h4 className="font-semibold text-sm mb-3 flex items-center gap-2">
-                <Lightbulb className="w-4 h-4 text-warning" />
+              </GlassCard>
+
               {/* Tips */}
               <GlassCard>
                 <View className="flex-row items-center gap-2 mb-3">
@@ -242,6 +245,10 @@ export function ExerciseDetailSheet({
                       <ChevronRight size={16} color="#31D5E3" style={{ marginTop: 2, flexShrink: 0 }} />
                       <Text className="text-sm text-muted-foreground flex-1">{tip}</Text>
                     </View>
+                  ))}
+                </View>
+              </GlassCard>
+              
               {/* Set Logging */}
               <GlassCard className="p-0 overflow-hidden">
                 <View className="p-4 border-b border-border/50">
@@ -278,6 +285,8 @@ export function ExerciseDetailSheet({
                         className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
                         placeholder={String(deloadMode ? Math.round((set.prevWeight || 0) * 0.6) : set.prevWeight)}
                         placeholderTextColor="#71717A"
+                        textAlignVertical="center"
+                        style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                       />
                     </View>
                     <View className="w-[20%]">
@@ -288,6 +297,8 @@ export function ExerciseDetailSheet({
                         className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
                         placeholder={String(set.prevReps)}
                         placeholderTextColor="#71717A"
+                        textAlignVertical="center"
+                        style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                       />
                     </View>
                     <View className="w-[20%] items-center">
@@ -311,10 +322,13 @@ export function ExerciseDetailSheet({
                 <View className="flex-1">
                   <Button
                     variant="outline"
-                    onPress={() => onViewHistory(exercise.id)}
+                    onPress={() => {
+                      onViewHistory(exercise.id);
+                      onClose();
+                    }}
                   >
                     <History size={16} color="#31D5E3" />
-                    <Text className="text-foreground ml-2">View History</Text>
+                    <Text className="text-foreground ml-2">History</Text>
                   </Button>
                 </View>
                 <View className="flex-1">
@@ -326,6 +340,8 @@ export function ExerciseDetailSheet({
                     <Text className="text-foreground ml-2">Swap</Text>
                   </Button>
                 </View>
+              </View>
+
               {/* Swap Options */}
               {showSwapOptions && (
                 <GlassCard>
@@ -356,8 +372,6 @@ export function ExerciseDetailSheet({
           </ScrollView>
         </View>
       </View>
-    </Modaliv>
-      </SheetContent>
-    </Sheet>
+    </Modal>
   );
 }

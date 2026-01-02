@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { View, Text, ScrollView, Pressable } from 'react-native';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { View, Text, ScrollView, Pressable, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
@@ -40,6 +41,41 @@ import {
 import { cn } from '@/lib/utils';
 
 export default function Settings() {
+  const headerAnim = useRef(new Animated.Value(0)).current;
+  const section1Anim = useRef(new Animated.Value(0)).current;
+  const section2Anim = useRef(new Animated.Value(0)).current;
+  const section3Anim = useRef(new Animated.Value(0)).current;
+  const section4Anim = useRef(new Animated.Value(0)).current;
+  const section5Anim = useRef(new Animated.Value(0)).current;
+  const section6Anim = useRef(new Animated.Value(0)).current;
+
+  useFocusEffect(
+    useCallback(() => {
+      headerAnim.setValue(0);
+      section1Anim.setValue(0);
+      section2Anim.setValue(0);
+      section3Anim.setValue(0);
+      section4Anim.setValue(0);
+      section5Anim.setValue(0);
+      section6Anim.setValue(0);
+      
+      Animated.stagger(60, [
+        Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section1Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section2Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section3Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section4Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section5Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section6Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]).start();
+    }, [headerAnim, section1Anim, section2Anim, section3Anim, section4Anim, section5Anim, section6Anim])
+  );
+
+  const createAnimStyle = (anim: Animated.Value) => ({
+    opacity: anim,
+    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+  });
+
   const [showMacroCalc, setShowMacroCalc] = useState(false);
   const [showInventory, setShowInventory] = useState(false);
   const [showBlacklist, setShowBlacklist] = useState(false);
@@ -142,15 +178,15 @@ export default function Settings() {
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
       <ScrollView className="flex-1">
         <View className="px-4 py-6 pb-24">
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
             <Text className="text-2xl font-bold text-foreground">Settings</Text>
             <Text className="text-muted-foreground text-sm mt-1">
               Customize your experience
             </Text>
-          </View>
+          </Animated.View>
 
           {/* Profile Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section1Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Profile
             </Text>
@@ -164,10 +200,10 @@ export default function Settings() {
               </View>
               <ChevronRight size={20} color="#71717A" />
             </GlassCard>
-          </View>
+          </Animated.View>
 
           {/* Gym & Training Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section2Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Gym & Training
             </Text>
@@ -198,10 +234,10 @@ export default function Settings() {
                 </GlassCard>
               </Pressable>
             </View>
-          </View>
+          </Animated.View>
 
           {/* Calculators Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section3Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Calculators
             </Text>
@@ -220,10 +256,10 @@ export default function Settings() {
                 <ChevronRight size={20} color="#71717A" />
               </GlassCard>
             </Pressable>
-          </View>
+          </Animated.View>
 
           {/* Notifications Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section4Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Notifications
             </Text>
@@ -259,10 +295,10 @@ export default function Settings() {
                 />
               </View>
             </GlassCard>
-          </View>
+          </Animated.View>
 
           {/* Subscription Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section5Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Subscription
             </Text>
@@ -298,10 +334,10 @@ export default function Settings() {
                 <Text className="text-primary-foreground font-semibold">Upgrade to Pro</Text>
               </Button>
             </GlassCard>
-          </View>
+          </Animated.View>
 
           {/* App Management Section */}
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(section6Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               App Management
             </Text>
@@ -332,7 +368,7 @@ export default function Settings() {
                 </GlassCard>
               </Pressable>
             </View>
-          </View>
+          </Animated.View>
         </View>
       </ScrollView>
 

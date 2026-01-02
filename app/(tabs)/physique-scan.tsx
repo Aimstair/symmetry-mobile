@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { View, Text, ScrollView } from 'react-native';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { View, Text, ScrollView, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -33,6 +34,42 @@ const muscleResults = [
 export default function PhysiqueScan() {
   const router = useRouter();
   const [phase, setPhase] = useState<ScanPhase>('idle');
+  const headerAnim = useRef(new Animated.Value(0)).current;
+  const mainCardAnim = useRef(new Animated.Value(0)).current;
+  const historyAnim = useRef(new Animated.Value(0)).current;
+
+  useFocusEffect(
+    useCallback(() => {
+      headerAnim.setValue(0);
+      mainCardAnim.setValue(0);
+      historyAnim.setValue(0);
+      if (phase === 'idle' || phase === 'results') {
+        Animated.stagger(100, [
+          Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(mainCardAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        ]).start();
+      }
+    }, [phase, headerAnim, mainCardAnim, historyAnim])
+  );
+
+  useEffect(() => {
+    headerAnim.setValue(0);
+    mainCardAnim.setValue(0);
+    historyAnim.setValue(0);
+    if (phase === 'idle' || phase === 'results') {
+      Animated.stagger(100, [
+        Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(mainCardAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]).start();
+    }
+  }, [phase]);
+
+  const createAnimStyle = (anim: Animated.Value) => ({
+    opacity: anim,
+    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+  });
   const [analysisStep, setAnalysisStep] = useState(0);
 
   const analysisSteps = [
@@ -88,14 +125,15 @@ export default function PhysiqueScan() {
           {/* Idle State */}
           {phase === 'idle' && (
             <View>
-              <View className="mb-6">
+              <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
                 <Text className="text-2xl font-bold text-foreground">Physique Analysis</Text>
                 <Text className="text-muted-foreground text-sm mt-1">
                   AI-powered symmetry detection
                 </Text>
-              </View>
+              </Animated.View>
 
               {/* Main Scan Card */}
+              <Animated.View style={createAnimStyle(mainCardAnim)}>
               <GlassCard variant="glow" glowColor="primary" className="mb-6">
                 <View className="rounded-xl bg-muted/30 border border-dashed border-primary/30 flex flex-col items-center justify-center relative overflow-hidden" style={{ aspectRatio: 3/4 }}>
                   {/* Silhouette guide overlay */}
@@ -133,8 +171,10 @@ export default function PhysiqueScan() {
                   </Text>
                 </Button>
               </GlassCard>
+              </Animated.View>
 
               {/* Previous Scans */}
+              <Animated.View style={createAnimStyle(historyAnim)}>
               <View className="flex-row items-center justify-between mb-3">
                 <View className="flex-row items-center gap-2">
                   <History size={20} color="#31D5E3" />
@@ -168,6 +208,7 @@ export default function PhysiqueScan() {
                   </GlassCard>
                 ))}
               </View>
+              </Animated.View>
             </View>
           )}
 
@@ -241,12 +282,13 @@ export default function PhysiqueScan() {
           {/* Results State */}
           {phase === 'results' && (
             <View>
-              <View className="mb-6">
+              <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
                 <Text className="text-2xl font-bold text-foreground">Analysis Complete</Text>
                 <Text className="text-muted-foreground text-sm mt-1">December 29, 2024</Text>
-              </View>
+              </Animated.View>
 
               {/* Symmetry Score */}
+              <Animated.View style={createAnimStyle(mainCardAnim)}>
               <GlassCard variant="glow" glowColor="primary" className="mb-6 items-center">
                 <View className="flex-row items-center justify-center mb-2">
                   <Sparkles size={16} color="#31D5E3" />
@@ -274,8 +316,10 @@ export default function PhysiqueScan() {
                   </View>
                 </View>
               </GlassCard>
+              </Animated.View>
 
               {/* Symmetry Breakdown */}
+              <Animated.View style={createAnimStyle(historyAnim)}>
               <View className="mb-4">
                 <Text className="text-lg font-semibold mb-3 text-foreground">Muscle Analysis</Text>
                 <View className="gap-2">
@@ -358,6 +402,7 @@ export default function PhysiqueScan() {
               >
                 <Text className="text-foreground font-medium">New Scan</Text>
               </Button>
+              </Animated.View>
             </View>
           )}
         </View>

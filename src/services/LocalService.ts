@@ -1,7 +1,7 @@
 /**
  * Local Data Service Implementation
  * 
- * Uses MMKV for fast, synchronous storage
+ * Uses AsyncStorage for Expo Go compatibility
  * All operations are Promise-based to match future CloudService API
  * 
  * Migration Path:
@@ -10,7 +10,7 @@
  * 3. UI code doesn't change - it only knows the interface
  */
 
-import { storage } from '@/lib/storage';
+import { getStorageItem, setStorageItem } from '@/lib/storage';
 import type {
   IDataService,
   IWorkoutService,
@@ -28,18 +28,18 @@ import type {
 } from '@/types';
 
 /**
- * Helper: Get data from MMKV
+ * Helper: Get data from storage
  */
 function getStorageData<T>(key: string): T[] {
-  const data = storage.getString(key);
-  return data ? JSON.parse(data) : [];
+  const data = getStorageItem<T[]>(key);
+  return data || [];
 }
 
 /**
- * Helper: Set data in MMKV
+ * Helper: Set data in storage
  */
-function setStorageData<T>(key: string, data: T[]): void {
-  storage.set(key, JSON.stringify(data));
+function setStorageDataArray<T>(key: string, data: T[]): void {
+  setStorageItem(key, data);
 }
 
 /**
@@ -61,7 +61,7 @@ class LocalWorkoutService implements IWorkoutService {
   async createWorkoutPlan(plan: WorkoutPlan): Promise<WorkoutPlan> {
     const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     plans.push(plan);
-    setStorageData(this.STORAGE_KEY, plans);
+    setStorageDataArray(this.STORAGE_KEY, plans);
     return plan;
   }
 
@@ -74,14 +74,14 @@ class LocalWorkoutService implements IWorkoutService {
     if (index === -1) throw new Error(`Workout plan ${id} not found`);
 
     plans[index] = { ...plans[index], ...updates };
-    setStorageData(this.STORAGE_KEY, plans);
+    setStorageDataArray(this.STORAGE_KEY, plans);
     return plans[index];
   }
 
   async deleteWorkoutPlan(id: string): Promise<void> {
     const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     const filtered = plans.filter((p) => p.id !== id);
-    setStorageData(this.STORAGE_KEY, filtered);
+    setStorageDataArray(this.STORAGE_KEY, filtered);
   }
 }
 
@@ -101,7 +101,7 @@ class LocalProgressService implements IProgressService {
   async addBodyMeasurement(measurement: BodyMeasurement): Promise<BodyMeasurement> {
     const data = getStorageData<BodyMeasurement>(this.BODY_KEY);
     data.push(measurement);
-    setStorageData(this.BODY_KEY, data);
+    setStorageDataArray(this.BODY_KEY, data);
     return measurement;
   }
 
@@ -113,7 +113,7 @@ class LocalProgressService implements IProgressService {
   async addPhysiqueScan(scan: PhysiqueScan): Promise<PhysiqueScan> {
     const data = getStorageData<PhysiqueScan>(this.SCAN_KEY);
     data.push(scan);
-    setStorageData(this.SCAN_KEY, data);
+    setStorageDataArray(this.SCAN_KEY, data);
     return scan;
   }
 
@@ -125,7 +125,7 @@ class LocalProgressService implements IProgressService {
   async addCardioLog(log: CardioLog): Promise<CardioLog> {
     const data = getStorageData<CardioLog>(this.CARDIO_KEY);
     data.push(log);
-    setStorageData(this.CARDIO_KEY, data);
+    setStorageDataArray(this.CARDIO_KEY, data);
     return log;
   }
 }
@@ -139,22 +139,19 @@ class LocalUserService implements IUserService {
   private readonly EQUIPMENT_KEY = 'equipment';
 
   async getUser(userId: string): Promise<User | null> {
-    const data = storage.getString(this.USER_KEY);
-    return data ? JSON.parse(data) : null;
+    return getStorageItem<User>(this.USER_KEY);
   }
 
   async getNutritionTargets(userId: string): Promise<NutritionTargets | null> {
-    const data = storage.getString(this.NUTRITION_KEY);
-    return data ? JSON.parse(data) : null;
+    return getStorageItem<NutritionTargets>(this.NUTRITION_KEY);
   }
 
   async getEquipment(userId: string): Promise<EquipmentProfile | null> {
-    const data = storage.getString(this.EQUIPMENT_KEY);
-    return data ? JSON.parse(data) : null;
+    return getStorageItem<EquipmentProfile>(this.EQUIPMENT_KEY);
   }
 
   async createUser(user: User): Promise<User> {
-    storage.set(this.USER_KEY, JSON.stringify(user));
+    setStorageItem(this.USER_KEY, user);
     return user;
   }
 
@@ -162,7 +159,7 @@ class LocalUserService implements IUserService {
     const current = await this.getUser(userId);
     if (!current) throw new Error('User not found');
     const updated = { ...current, ...updates };
-    storage.set(this.USER_KEY, JSON.stringify(updated));
+    setStorageItem(this.USER_KEY, updated);
     return updated;
   }
 
@@ -170,7 +167,7 @@ class LocalUserService implements IUserService {
     userId: string,
     targets: NutritionTargets
   ): Promise<NutritionTargets> {
-    storage.set(this.NUTRITION_KEY, JSON.stringify(targets));
+    setStorageItem(this.NUTRITION_KEY, targets);
     return targets;
   }
 
@@ -178,7 +175,7 @@ class LocalUserService implements IUserService {
     userId: string,
     equipment: EquipmentProfile
   ): Promise<EquipmentProfile> {
-    storage.set(this.EQUIPMENT_KEY, JSON.stringify(equipment));
+    setStorageItem(this.EQUIPMENT_KEY, equipment);
     return equipment;
   }
 }

@@ -15,6 +15,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "1.23.1",
     "@shopify/flash-list": "1.7.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -22,6 +23,7 @@
     "expo-camera": "~16.0.0",
     "expo-constants": "~17.0.3",
     "expo-image-picker": "~16.0.0",
+    "expo-linear-gradient": "~14.0.2",
     "expo-linking": "~7.0.5",
     "expo-router": "~4.0.17",
     "expo-status-bar": "~2.0.1",
@@ -29,6 +31,7 @@
     "nativewind": "^4.0.1",
     "react": "18.3.1",
     "react-native": "0.76.9",
+    "react-native-gesture-handler": "~2.20.2",
     "react-native-gifted-charts": "^1.4.70",
     "react-native-linear-gradient": "^2.8.3",
     "react-native-mmkv": "^2.12.2",
@@ -40,6 +43,9 @@
     "react-native-worklets-core": "^1.6.2",
     "tailwind-merge": "^2.6.0",
     "zustand": "^5.0.9"
+  },
+  "overrides": {
+    "react-native-css-interop": "0.1.22"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

@@ -1,11 +1,13 @@
-import { useState } from 'react';
-import { View, Text, ScrollView, Dimensions } from 'react-native';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, ScrollView, Dimensions, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { GestureDetector, GestureHandlerRootView, Pressable } from 'react-native-gesture-handler';
+import { ExerciseHistorySheet } from '@/components/ui/workout/ExerciseHistorySheet';
 import { 
   TrendingUp, 
   Scale, 
@@ -15,7 +17,10 @@ import {
   ChevronUp,
   ChevronDown,
   Minus,
-  ChevronRight
+  ChevronRight,
+  Search,
+  Filter,
+  Dumbbell
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
@@ -51,9 +56,111 @@ const measurements = [
   { name: 'Right Thigh', current: 24.8, previous: 24.2, unit: 'in' },
 ];
 
+// Exercise history data
+const exerciseStats = [
+  { 
+    name: 'Bench Press', 
+    muscle: 'Chest',
+    pr: 225,
+    lastWeight: 205,
+    sessions: 24,
+    trend: 'up',
+    history: [
+      { date: 'Dec 20', weight: 205 },
+      { date: 'Dec 13', weight: 200 },
+      { date: 'Dec 6', weight: 195 },
+      { date: 'Nov 29', weight: 190 },
+      { date: 'Nov 22', weight: 185 },
+    ]
+  },
+  { 
+    name: 'Squat', 
+    muscle: 'Legs',
+    pr: 315,
+    lastWeight: 285,
+    sessions: 20,
+    trend: 'up',
+    history: [
+      { date: 'Dec 20', weight: 285 },
+      { date: 'Dec 13', weight: 275 },
+      { date: 'Dec 6', weight: 270 },
+      { date: 'Nov 29', weight: 265 },
+      { date: 'Nov 22', weight: 260 },
+    ]
+  },
+  { 
+    name: 'Deadlift', 
+    muscle: 'Back',
+    pr: 365,
+    lastWeight: 335,
+    sessions: 18,
+    trend: 'stable',
+    history: [
+      { date: 'Dec 20', weight: 335 },
+      { date: 'Dec 13', weight: 335 },
+      { date: 'Dec 6', weight: 330 },
+      { date: 'Nov 29', weight: 325 },
+      { date: 'Nov 22', weight: 320 },
+    ]
+  },
+  { 
+    name: 'Shoulder Press', 
+    muscle: 'Shoulders',
+    pr: 155,
+    lastWeight: 135,
+    sessions: 22,
+    trend: 'up',
+    history: [
+      { date: 'Dec 20', weight: 135 },
+      { date: 'Dec 13', weight: 130 },
+      { date: 'Dec 6', weight: 125 },
+      { date: 'Nov 29', weight: 125 },
+      { date: 'Nov 22', weight: 120 },
+    ]
+  },
+  { 
+    name: 'Barbell Row', 
+    muscle: 'Back',
+    pr: 205,
+    lastWeight: 185,
+    sessions: 16,
+    trend: 'up',
+    history: [
+      { date: 'Dec 20', weight: 185 },
+      { date: 'Dec 13', weight: 180 },
+      { date: 'Dec 6', weight: 175 },
+      { date: 'Nov 29', weight: 170 },
+      { date: 'Nov 22', weight: 165 },
+    ]
+  },
+];
+
 export default function Progress() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('overview');
+  const [exerciseSearch, setExerciseSearch] = useState('');
+  const [exerciseFilter, setExerciseFilter] = useState('recent');
+  const [selectedExerciseId, setSelectedExerciseId] = useState<string | null>(null);
+  const [showExerciseHistory, setShowExerciseHistory] = useState(false);
+  
+  const headerAnim = useRef(new Animated.Value(0)).current;
+  const contentAnim = useRef(new Animated.Value(0)).current;
+
+  useFocusEffect(
+    useCallback(() => {
+      headerAnim.setValue(0);
+      contentAnim.setValue(0);
+      Animated.stagger(100, [
+        Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(contentAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
+      ]).start();
+    }, [headerAnim, contentAnim])
+  );
+
+  const createAnimStyle = (anim: Animated.Value) => ({
+    opacity: anim,
+    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+  });
 
   const getDelta = (current: number, previous: number, inverse?: boolean) => {
     const delta = current - previous;
@@ -61,20 +168,39 @@ export default function Progress() {
     return { value: Math.abs(delta).toFixed(1), isPositive };
   };
 
+  // Filter and sort exercises
+  const filteredExercises = exerciseStats
+    .filter(ex => ex.name.toLowerCase().includes(exerciseSearch.toLowerCase()) ||
+                  ex.muscle.toLowerCase().includes(exerciseSearch.toLowerCase()))
+    .sort((a, b) => {
+      switch (exerciseFilter) {
+        case 'name':
+          return a.name.localeCompare(b.name);
+        case 'muscle':
+          return a.muscle.localeCompare(b.muscle);
+        case 'pr':
+          return b.pr - a.pr;
+        default: // recent
+          return b.sessions - a.sessions;
+      }
+    });
+
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
       <ScrollView className="flex-1">
         <View className="px-4 py-6 pb-24">
-          <View className="mb-6">
+          <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
             <Text className="text-2xl font-bold text-foreground">Progress</Text>
             <Text className="text-muted-foreground text-sm mt-1">
               Track your transformation
             </Text>
-          </View>
+          </Animated.View>
 
+          <Animated.View style={createAnimStyle(contentAnim)}>
           <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-            <TabsList className="w-full mb-6">
+            <TabsList className="w-full mb-6 ">
               <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="exercises">Exercises</TabsTrigger>
               <TabsTrigger value="body">Body</TabsTrigger>
               <TabsTrigger value="cardio">Cardio</TabsTrigger>
             </TabsList>
@@ -90,11 +216,53 @@ export default function Progress() {
                   </View>
                   <Text className="text-sm text-success">+3.5 lbs</Text>
                 </View>
-                <GlassCard>
-                  <View className="h-48 items-center justify-center">
-                    <Text className="text-muted-foreground text-sm">Chart temporarily disabled</Text>
-                    {/* TODO: Replace with react-native-gifted-charts LineChart */}
-                    {/* <LineChart data={weightData.map(d => ({ value: d.weight, label: d.date }))} /> */}
+                <GlassCard className="p-0 overflow-hidden pb-4">
+                  <View className="items-center justify-center pt-4">
+                    <LineChart
+                      data={weightData.map(d => ({ value: d.weight, label: d.date.split(' ')[1] }))}
+                      curved
+                      areaChart
+                      height={180}
+                      width={chartWidth}
+                      spacing={30}
+                      initialSpacing={10}
+                      color="#31D5E3"
+                      thickness={3}
+                      startFillColor="#31D5E3"
+                      endFillColor="#31D5E3"
+                      startOpacity={0.3}
+                      endOpacity={0.05}
+                      dataPointsColor="#31D5E3"
+                      dataPointsRadius={4}
+                      hideDataPoints={false}
+                      yAxisColor="#27272A"
+                      xAxisColor="#27272A"
+                      yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                      xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 9 }}
+                      rulesType="solid"
+                      rulesColor="#27272A"
+                      noOfSections={4}
+                      backgroundColor="transparent"
+                      pointerConfig={{
+                        pointerStripHeight: 160,
+                        pointerStripColor: '#31D5E3',
+                        pointerStripWidth: 2,
+                        pointerColor: '#31D5E3',
+                        radius: 6,
+                        pointerLabelWidth: 100,
+                        pointerLabelHeight: 90,
+                        activatePointersOnLongPress: true,
+                        autoAdjustPointerLabelPosition: false,
+                        pointerLabelComponent: (items: any) => {
+                          return (
+                            <View className="bg-card border border-border rounded-lg px-3 py-2">
+                              <Text className="text-xs text-primary font-bold">{items[0].value} lbs</Text>
+                              <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
+                            </View>
+                          );
+                        },
+                      }}
+                    />
                   </View>
                 </GlassCard>
               </View>
@@ -116,10 +284,53 @@ export default function Progress() {
                     <ChevronRight size={16} color="#31D5E3" />
                   </Button>
                 </View>
-                <GlassCard>
-                  <View className="h-48 items-center justify-center">
-                    <Text className="text-muted-foreground text-sm">Chart temporarily disabled</Text>
-                    {/* TODO: Replace with react-native-gifted-charts LineChart */}
+                <GlassCard className="p-0 overflow-hidden pb-4">
+                  <View className="items-center justify-center pt-4">
+                    <LineChart
+                      data={symmetryData.map(d => ({ value: d.score, label: d.date }))}
+                      curved
+                      areaChart
+                      height={180}
+                      width={chartWidth}
+                      spacing={80}
+                      initialSpacing={20}
+                      color="#4ADE80"
+                      thickness={3}
+                      startFillColor="#4ADE80"
+                      endFillColor="#4ADE80"
+                      startOpacity={0.3}
+                      endOpacity={0.05}
+                      dataPointsColor="#4ADE80"
+                      dataPointsRadius={5}
+                      hideDataPoints={false}
+                      yAxisColor="#27272A"
+                      xAxisColor="#27272A"
+                      yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                      xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                      rulesType="solid"
+                      rulesColor="#27272A"
+                      noOfSections={4}
+                      backgroundColor="transparent"
+                      pointerConfig={{
+                        pointerStripHeight: 160,
+                        pointerStripColor: '#4ADE80',
+                        pointerStripWidth: 2,
+                        pointerColor: '#4ADE80',
+                        radius: 6,
+                        pointerLabelWidth: 100,
+                        pointerLabelHeight: 90,
+                        activatePointersOnLongPress: true,
+                        autoAdjustPointerLabelPosition: false,
+                        pointerLabelComponent: (items: any) => {
+                          return (
+                            <View className="bg-card border border-border rounded-lg px-3 py-2">
+                              <Text className="text-xs text-success font-bold">Score: {items[0].value}</Text>
+                              <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
+                            </View>
+                          );
+                        },
+                      }}
+                    />
                   </View>
                 </GlassCard>
               </View>
@@ -154,6 +365,88 @@ export default function Progress() {
                   </View>
                 </View>
               </View>
+            </TabsContent>
+
+            {/* Exercises Tab */}
+            <TabsContent value="exercises" className="gap-4">
+              <View>
+                {/* Search and Filter */}
+                <View className="flex-row gap-2 mb-4">
+                  <View className="relative flex-1">
+                    <View className="absolute left-3 top-1/2 z-10" style={{ transform: [{ translateY: -10 }] }}>
+                      <Search size={16} color="#71717A" />
+                    </View>
+                    <Input
+                      placeholder="Search exercises..."
+                      value={exerciseSearch}
+                      onChangeText={setExerciseSearch}
+                      className="pl-9"
+                    />
+                  </View>
+                  <GestureHandlerRootView>
+                  <Pressable
+                    onPress={() => {
+                      const filters = ['recent', 'name', 'muscle', 'pr'];
+                      const currentIndex = filters.indexOf(exerciseFilter);
+                      setExerciseFilter(filters[(currentIndex + 1) % filters.length]);
+                    }}
+                    className="px-3 py-2 border border-border rounded-lg flex-row items-center gap-2 bg-card"
+                  >
+                    <Filter size={16} color="#71717A" />
+                    <Text className="text-sm text-foreground capitalize">{exerciseFilter}</Text>
+                  </Pressable>
+                  </GestureHandlerRootView>
+                </View>
+
+                {/* Exercise List */}
+                <View className="gap-2">
+                  {filteredExercises.map((exercise, i) => (
+                    <GestureHandlerRootView>
+                    <Pressable
+                      key={exercise.name}
+                      onPress={() => {
+                        setSelectedExerciseId(exercise.name.toLowerCase().replace(/\s+/g, '-'));
+                        setShowExerciseHistory(true);
+                      }}
+                    >
+                      <GlassCard className="flex-row items-center justify-between">
+                      <View className="flex-row items-center gap-3 flex-1">
+                        <View className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center">
+                          <Dumbbell size={20} color="#31D5E3" />
+                        </View>
+                        <View className="flex-1">
+                          <Text className="font-medium text-foreground">{exercise.name}</Text>
+                          <Text className="text-xs text-muted-foreground">{exercise.muscle}</Text>
+                        </View>
+                      </View>
+                      <View className="items-end">
+                        <Text className="font-bold text-foreground">{exercise.lastWeight} lbs</Text>
+                        <View className="flex-row items-center gap-1">
+                          <Text className="text-xs text-muted-foreground">PR: {exercise.pr} lbs</Text>
+                          {exercise.trend === 'up' && <TrendingUp size={12} color="#4ADE80" />}
+                        </View>
+                      </View>
+                    </GlassCard>
+                    </Pressable>
+                    </GestureHandlerRootView>
+                  ))}
+                  
+                  {filteredExercises.length === 0 && (
+                    <View className="items-center py-8">
+                      <Dumbbell size={32} color="#71717A" style={{ opacity: 0.5 }} />
+                      <Text className="text-muted-foreground mt-2">No exercises found</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Exercise History Sheet */}
+              <ExerciseHistorySheet
+                exerciseId={selectedExerciseId}
+                isOpen={showExerciseHistory}
+                onClose={() => setShowExerciseHistory(false)}
+                unit="lbs"
+              />
             </TabsContent>
 
             {/* Body Measurements Tab */}
@@ -302,6 +595,7 @@ export default function Progress() {
               </View>
             </TabsContent>
           </Tabs>
+          </Animated.View>
         </View>
       </ScrollView>
     </SafeAreaView>
