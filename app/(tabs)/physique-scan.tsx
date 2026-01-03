@@ -3,6 +3,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import { View, Text, ScrollView, Animated, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import * as Crypto from 'expo-crypto';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
@@ -151,7 +152,7 @@ export default function PhysiqueScan() {
           
           // Generate mock scan results (in production, this would come from AI analysis)
           const newScan: PhysiqueScanType = {
-            id: `scan-${Date.now()}`,
+            id: Crypto.randomUUID(),
             userId: user.id,
             date: new Date(),
             images: {},
