@@ -175,7 +175,7 @@ export default function SymmetryHistory() {
             <Button 
               variant="ghost" 
               size="icon"
-              onPress={() => router.back()}
+              onPress={() => router.push('/(tabs)/progress')}
               className="shrink-0"
             >
               <ArrowLeft size={20} color="#A1A1AA" />

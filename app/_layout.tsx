@@ -50,10 +50,17 @@ export default function RootLayout() {
       >
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+        <Stack.Screen name="symmetry-history" 
+          options={{ 
+            headerShown: false,
+            animation: 'slide_from_right',
+          }} 
+        />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen
           name="active-workout"
           options={{
+            headerShown: false,
             presentation: 'fullScreenModal',
             animation: 'slide_from_bottom',
           }}
