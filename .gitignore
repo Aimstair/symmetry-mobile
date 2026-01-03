@@ -34,9 +34,16 @@ yarn-error.*
 .env
 .env*.local
 
+# Supabase
+.branches
+.temp
+supabase/.temp
+
 # typescript
 *.tsbuildinfo
 
 # generated native folders
 /ios
 /android
+".env" 
+".env.example" 

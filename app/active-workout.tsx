@@ -249,7 +249,7 @@ export default function ActiveWorkout() {
       <View className="border-b border-border bg-card">
         <View className="flex-row items-center justify-between px-4 py-3">
           <Pressable 
-            onPress={() => router.replace('/(tabs)/workout-plan')}
+            onPress={() => router.push('/(tabs)/workout-plan')}
             className="p-2 -ml-2"
             style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
           >
@@ -424,7 +424,7 @@ export default function ActiveWorkout() {
       {/* Finish Button */}
       <View className="absolute bottom-4 left-4 right-4">
         <Button 
-          onPress={() => router.replace('/(tabs)/workout-plan')}
+          onPress={() => router.push('/(tabs)/workout-plan')}
           className="w-full bg-primary h-12"
         >
           <Flame size={20} color="#FFFFFF" />
