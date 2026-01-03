@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Animated } from 'react-native';
+import { View, Text, ScrollView, Animated, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { useAppStore } from '@/store/useAppStore';
+import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
 import Svg, { Ellipse, Line, Path, Rect, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { 
   Camera, 
@@ -17,29 +19,81 @@ import {
   ArrowUp
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+import type { PhysiqueScan as PhysiqueScanType } from '@/types';
 
 type ScanPhase = 'idle' | 'scanning' | 'analyzing' | 'results';
 
-const muscleResults = [
-  { muscle: 'Chest', status: 'strong', score: 92 },
-  { muscle: 'Back (Lats)', status: 'balanced', score: 85 },
-  { muscle: 'Shoulders', status: 'balanced', score: 83 },
-  { muscle: 'Left Bicep', status: 'lagging', score: 72, delta: -8 },
-  { muscle: 'Right Bicep', status: 'strong', score: 80 },
-  { muscle: 'Left Quad', status: 'balanced', score: 86 },
-  { muscle: 'Right Quad', status: 'balanced', score: 84 },
-  { muscle: 'Abs', status: 'lagging', score: 68 },
-];
+// Helper to format dates
+function formatScanDate(date: Date | string): string {
+  const d = new Date(date);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// Helper to calculate score change between scans
+function calculateScoreChange(scans: PhysiqueScanType[]): number {
+  if (scans.length < 2) return 0;
+  const sorted = scans.slice().sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return sorted[0].symmetryScore - sorted[1].symmetryScore;
+}
+
+// Transform muscle scores to display format
+function transformMuscleResults(scan: PhysiqueScanType | null) {
+  if (!scan) return [];
+  
+  const getStatus = (score: number) => {
+    if (score >= 85) return 'strong';
+    if (score >= 70) return 'balanced';
+    return 'lagging';
+  };
+  
+  return [
+    { muscle: 'Chest', status: getStatus(scan.muscleScores.chest), score: scan.muscleScores.chest },
+    { muscle: 'Back', status: getStatus(scan.muscleScores.back), score: scan.muscleScores.back },
+    { muscle: 'Shoulders', status: getStatus(scan.muscleScores.shoulders), score: scan.muscleScores.shoulders },
+    { muscle: 'Arms', status: getStatus(scan.muscleScores.arms), score: scan.muscleScores.arms },
+    { muscle: 'Legs', status: getStatus(scan.muscleScores.legs), score: scan.muscleScores.legs },
+  ];
+}
 
 export default function PhysiqueScan() {
   const router = useRouter();
   const [phase, setPhase] = useState<ScanPhase>('idle');
+  const [analysisStep, setAnalysisStep] = useState(0);
+  const [currentScanResult, setCurrentScanResult] = useState<PhysiqueScanType | null>(null);
+  
   const headerAnim = useRef(new Animated.Value(0)).current;
   const mainCardAnim = useRef(new Animated.Value(0)).current;
   const historyAnim = useRef(new Animated.Value(0)).current;
 
+  // Get user and data from store
+  const user = useAppStore((s) => s.user);
+  const physiqueScans = useAppStore((s) => s.physiqueScans);
+  const syncAddPhysiqueScan = useAppStore((s) => s.syncAddPhysiqueScan);
+  const isLoading = useAppStore((s) => s.isLoading);
+
+  // Load progress data on focus
+  const { loadProgressData } = useProgressDataInitialization(user?.id ?? null);
+
+  // Derive data from store
+  const sortedScans = useMemo(() => 
+    physiqueScans
+      .slice()
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()),
+    [physiqueScans]
+  );
+  
+  const latestScan = sortedScans[0] || null;
+  const previousScans = sortedScans.slice(0, 3); // Show last 3 scans in history
+  const scoreChange = calculateScoreChange(physiqueScans);
+  const muscleResults = useMemo(() => 
+    transformMuscleResults(currentScanResult || latestScan),
+    [currentScanResult, latestScan]
+  );
+
   useFocusEffect(
     useCallback(() => {
+      loadProgressData();
+      
       headerAnim.setValue(0);
       mainCardAnim.setValue(0);
       historyAnim.setValue(0);
@@ -50,7 +104,7 @@ export default function PhysiqueScan() {
           Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         ]).start();
       }
-    }, [phase, headerAnim, mainCardAnim, historyAnim])
+    }, [phase, headerAnim, mainCardAnim, historyAnim, loadProgressData])
   );
 
   useEffect(() => {
@@ -70,7 +124,6 @@ export default function PhysiqueScan() {
     opacity: anim,
     transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
   });
-  const [analysisStep, setAnalysisStep] = useState(0);
 
   const analysisSteps = [
     'Mapping Skeleton...',
@@ -78,8 +131,11 @@ export default function PhysiqueScan() {
     'Calculating Symmetry...',
   ];
 
-  const startScan = () => {
+  const startScan = async () => {
+    if (!user) return;
+    
     setPhase('scanning');
+    setAnalysisStep(0);
     
     // Simulate camera capture
     setTimeout(() => {
@@ -87,14 +143,40 @@ export default function PhysiqueScan() {
       
       // Run through analysis steps
       let step = 0;
-      const interval = setInterval(() => {
+      const interval = setInterval(async () => {
         step++;
         setAnalysisStep(step);
         if (step >= analysisSteps.length) {
           clearInterval(interval);
+          
+          // Generate mock scan results (in production, this would come from AI analysis)
+          const newScan: PhysiqueScanType = {
+            id: `scan-${Date.now()}`,
+            userId: user.id,
+            date: new Date(),
+            images: {},
+            symmetryScore: Math.floor(Math.random() * 20) + 75, // 75-95 range
+            muscleScores: {
+              chest: Math.floor(Math.random() * 25) + 70,
+              back: Math.floor(Math.random() * 25) + 70,
+              shoulders: Math.floor(Math.random() * 25) + 70,
+              arms: Math.floor(Math.random() * 25) + 70,
+              legs: Math.floor(Math.random() * 25) + 70,
+            },
+            notes: 'AI-generated analysis',
+          };
+          
+          try {
+            const savedScan = await syncAddPhysiqueScan(newScan);
+            setCurrentScanResult(savedScan);
+          } catch (error) {
+            console.error('Failed to save scan:', error);
+            setCurrentScanResult(newScan); // Still show results even if save failed
+          }
+          
           setTimeout(() => {
             setPhase('results');
-          }, 1000);
+          }, 500);
         }
       }, 2000);
     }, 2000);
@@ -191,23 +273,36 @@ export default function PhysiqueScan() {
                 </Button>
               </View>
 
-              <View className="gap-3">
-                {[
-                  { date: 'Dec 20, 2024', score: 82, change: 3 },
-                  { date: 'Dec 13, 2024', score: 79, change: 1 },
-                ].map((scan, i) => (
-                  <GlassCard key={i} className="flex-row items-center justify-between">
-                    <View>
-                      <Text className="font-medium text-foreground">{scan.date}</Text>
-                      <Text className="text-sm text-muted-foreground">Front Double Bicep</Text>
-                    </View>
-                    <View className="items-end">
-                      <Text className="text-2xl font-bold text-primary">{scan.score}</Text>
-                      <Text className="text-xs text-success">+{scan.change} pts</Text>
-                    </View>
-                  </GlassCard>
-                ))}
-              </View>
+              {previousScans.length > 0 ? (
+                <View className="gap-3">
+                  {previousScans.map((scan, i) => {
+                    const prevScan = sortedScans[i + 1];
+                    const change = prevScan ? scan.symmetryScore - prevScan.symmetryScore : 0;
+                    return (
+                      <GlassCard key={scan.id} className="flex-row items-center justify-between">
+                        <View>
+                          <Text className="font-medium text-foreground">{formatScanDate(scan.date)}</Text>
+                          <Text className="text-sm text-muted-foreground">Front Double Bicep</Text>
+                        </View>
+                        <View className="items-end">
+                          <Text className="text-2xl font-bold text-primary">{scan.symmetryScore}</Text>
+                          {change !== 0 && (
+                            <Text className={cn('text-xs', change > 0 ? 'text-success' : 'text-destructive')}>
+                              {change > 0 ? '+' : ''}{change} pts
+                            </Text>
+                          )}
+                        </View>
+                      </GlassCard>
+                    );
+                  })}
+                </View>
+              ) : (
+                <GlassCard className="items-center py-6">
+                  <History size={32} color="#71717A" style={{ opacity: 0.5 }} />
+                  <Text className="text-muted-foreground mt-2">No previous scans</Text>
+                  <Text className="text-xs text-muted-foreground mt-1">Complete your first scan above</Text>
+                </GlassCard>
+              )}
               </Animated.View>
             </View>
           )}
@@ -280,11 +375,11 @@ export default function PhysiqueScan() {
           )}
 
           {/* Results State */}
-          {phase === 'results' && (
+          {phase === 'results' && currentScanResult && (
             <View>
               <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
                 <Text className="text-2xl font-bold text-foreground">Analysis Complete</Text>
-                <Text className="text-muted-foreground text-sm mt-1">December 29, 2024</Text>
+                <Text className="text-muted-foreground text-sm mt-1">{formatScanDate(currentScanResult.date)}</Text>
               </Animated.View>
 
               {/* Symmetry Score */}
@@ -296,22 +391,35 @@ export default function PhysiqueScan() {
                     Symmetry Score
                   </Text>
                 </View>
-                <Text className="text-6xl font-bold text-primary mb-2">85</Text>
-                <Text className="text-sm text-muted-foreground">
-                  +3 points from last scan
-                </Text>
+                <Text className="text-6xl font-bold text-primary mb-2">{currentScanResult.symmetryScore}</Text>
+                {scoreChange !== 0 && (
+                  <Text className={cn('text-sm', scoreChange > 0 ? 'text-success' : 'text-destructive')}>
+                    {scoreChange > 0 ? '+' : ''}{scoreChange} points from last scan
+                  </Text>
+                )}
+                {scoreChange === 0 && previousScans.length === 1 && (
+                  <Text className="text-sm text-muted-foreground">
+                    First scan recorded!
+                  </Text>
+                )}
                 
                 <View className="flex-row justify-between w-full mt-6 pt-4 border-t border-border">
                   <View className="items-center flex-1">
-                    <Text className="text-sm font-bold text-success">4</Text>
+                    <Text className="text-sm font-bold text-success">
+                      {muscleResults.filter(m => m.status === 'strong').length}
+                    </Text>
                     <Text className="text-xs text-muted-foreground">Strong</Text>
                   </View>
                   <View className="items-center flex-1">
-                    <Text className="text-sm font-bold text-primary">3</Text>
+                    <Text className="text-sm font-bold text-primary">
+                      {muscleResults.filter(m => m.status === 'balanced').length}
+                    </Text>
                     <Text className="text-xs text-muted-foreground">Balanced</Text>
                   </View>
                   <View className="items-center flex-1">
-                    <Text className="text-sm font-bold text-destructive">2</Text>
+                    <Text className="text-sm font-bold text-destructive">
+                      {muscleResults.filter(m => m.status === 'lagging').length}
+                    </Text>
                     <Text className="text-xs text-muted-foreground">Lagging</Text>
                   </View>
                 </View>
@@ -335,21 +443,6 @@ export default function PhysiqueScan() {
                         <Text className="font-medium text-sm text-foreground">{result.muscle}</Text>
                       </View>
                       <View className="flex-row items-center gap-2">
-                        {result.delta && (
-                          <View className="flex-row items-center gap-0.5">
-                            {result.delta < 0 ? (
-                              <ArrowDown size={12} color="#EF4444" />
-                            ) : (
-                              <ArrowUp size={12} color="#4ADE80" />
-                            )}
-                            <Text className={cn(
-                              'text-xs font-medium',
-                              result.delta < 0 ? 'text-destructive' : 'text-success'
-                            )}>
-                              {Math.abs(result.delta)}%
-                            </Text>
-                          </View>
-                        )}
                         <View className={cn(
                           'px-2 py-0.5 rounded',
                           getStatusBg(result.status)
@@ -374,29 +467,41 @@ export default function PhysiqueScan() {
                   <Text className="font-semibold text-foreground">AI Recommendations</Text>
                 </View>
                 <View className="gap-2">
-                  <View className="flex-row items-start gap-2">
-                    <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
-                    <Text className="text-sm text-muted-foreground flex-1">
-                      Add extra unilateral work for left bicep (concentration curls, hammer curls)
-                    </Text>
-                  </View>
-                  <View className="flex-row items-start gap-2">
-                    <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
-                    <Text className="text-sm text-muted-foreground flex-1">
-                      Increase ab training frequency to 3x per week
-                    </Text>
-                  </View>
-                  <View className="flex-row items-start gap-2">
-                    <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
-                    <Text className="text-sm text-muted-foreground flex-1">
-                      Maintain current chest development - excellent progress
-                    </Text>
-                  </View>
+                  {muscleResults.filter(m => m.status === 'lagging').length > 0 ? (
+                    muscleResults
+                      .filter(m => m.status === 'lagging')
+                      .map(m => (
+                        <View key={m.muscle} className="flex-row items-start gap-2">
+                          <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
+                          <Text className="text-sm text-muted-foreground flex-1">
+                            Focus on {m.muscle.toLowerCase()} training - currently below target
+                          </Text>
+                        </View>
+                      ))
+                  ) : (
+                    <View className="flex-row items-start gap-2">
+                      <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
+                      <Text className="text-sm text-muted-foreground flex-1">
+                        Great balance! Maintain current training routine
+                      </Text>
+                    </View>
+                  )}
+                  {muscleResults.filter(m => m.status === 'strong').length > 0 && (
+                    <View className="flex-row items-start gap-2">
+                      <ArrowRight size={16} color="#31D5E3" style={{ marginTop: 2 }} />
+                      <Text className="text-sm text-muted-foreground flex-1">
+                        Excellent {muscleResults.filter(m => m.status === 'strong').map(m => m.muscle.toLowerCase()).join(', ')} development
+                      </Text>
+                    </View>
+                  )}
                 </View>
               </GlassCard>
 
               <Button 
-                onPress={() => setPhase('idle')}
+                onPress={() => {
+                  setPhase('idle');
+                  setCurrentScanResult(null);
+                }}
                 className="w-full"
                 variant="outline"
               >

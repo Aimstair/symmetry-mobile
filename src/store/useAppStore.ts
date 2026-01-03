@@ -100,6 +100,11 @@ interface AppState {
   syncDeleteWorkoutPlanFromCloud: (id: string) => Promise<void>;
   syncUserToCloud: (user: User) => Promise<User>;
   syncUpdateUserToCloud: (userId: string, updates: Partial<User>) => Promise<User>;
+  
+  // Async Actions - Progress Data
+  syncAddBodyMeasurement: (measurement: BodyMeasurement) => Promise<BodyMeasurement>;
+  syncAddPhysiqueScan: (scan: PhysiqueScan) => Promise<PhysiqueScan>;
+  syncAddCardioLog: (log: CardioLog) => Promise<CardioLog>;
 }
 
 const initialSettings: AppSettings = {
@@ -399,6 +404,61 @@ export const useAppStore = create<AppState>()(
         } catch (error) {
           set({ isLoading: false, loadingMessage: null });
           console.error('❌ Failed to update user:', error);
+          throw error;
+        }
+      },
+
+      // Progress Sync Actions
+      syncAddBodyMeasurement: async (measurement) => {
+        set({ isLoading: true, loadingMessage: 'Saving measurement...' });
+        try {
+          const savedMeasurement = await dataService.progress.addBodyMeasurement(measurement);
+          set((state) => ({
+            bodyMeasurements: [...state.bodyMeasurements, savedMeasurement],
+            isLoading: false,
+            loadingMessage: null,
+          }));
+          if (__DEV__) console.log('✅ Body measurement synced:', savedMeasurement.id);
+          return savedMeasurement;
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to sync body measurement:', error);
+          throw error;
+        }
+      },
+
+      syncAddPhysiqueScan: async (scan) => {
+        set({ isLoading: true, loadingMessage: 'Saving scan results...' });
+        try {
+          const savedScan = await dataService.progress.addPhysiqueScan(scan);
+          set((state) => ({
+            physiqueScans: [...state.physiqueScans, savedScan],
+            isLoading: false,
+            loadingMessage: null,
+          }));
+          if (__DEV__) console.log('✅ Physique scan synced:', savedScan.id);
+          return savedScan;
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to sync physique scan:', error);
+          throw error;
+        }
+      },
+
+      syncAddCardioLog: async (log) => {
+        set({ isLoading: true, loadingMessage: 'Saving cardio session...' });
+        try {
+          const savedLog = await dataService.progress.addCardioLog(log);
+          set((state) => ({
+            cardioLogs: [...state.cardioLogs, savedLog],
+            isLoading: false,
+            loadingMessage: null,
+          }));
+          if (__DEV__) console.log('✅ Cardio log synced:', savedLog.id);
+          return savedLog;
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to sync cardio log:', error);
           throw error;
         }
       },
