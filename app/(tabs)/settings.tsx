@@ -1,12 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { useAppStore } from '@/store/useAppStore';
+import { supabase } from '@/lib/supabase';
 import { 
   Dialog,
   DialogContent,
@@ -36,11 +39,16 @@ import {
   Ban,
   Search,
   X,
-  Sparkles
+  Sparkles,
+  LogOut,
+  Edit3,
+  Save
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+import type { User as UserType } from '@/types';
 
 export default function Settings() {
+  const router = useRouter();
   const headerAnim = useRef(new Animated.Value(0)).current;
   const section1Anim = useRef(new Animated.Value(0)).current;
   const section2Anim = useRef(new Animated.Value(0)).current;
@@ -48,6 +56,43 @@ export default function Settings() {
   const section4Anim = useRef(new Animated.Value(0)).current;
   const section5Anim = useRef(new Animated.Value(0)).current;
   const section6Anim = useRef(new Animated.Value(0)).current;
+
+  // Get store data and actions
+  const user = useAppStore((s) => s.user);
+  const settings = useAppStore((s) => s.settings);
+  const equipment = useAppStore((s) => s.equipment);
+  const nutritionTargets = useAppStore((s) => s.nutritionTargets);
+  const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
+  const setNutritionTargets = useAppStore((s) => s.setNutritionTargets);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const resetStore = useAppStore((s) => s.resetStore);
+  const isLoading = useAppStore((s) => s.isLoading);
+
+  // Profile editing state
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [showProfileEdit, setShowProfileEdit] = useState(false);
+  const [profileForm, setProfileForm] = useState({
+    name: user?.name || '',
+    age: user?.age?.toString() || '',
+    gender: user?.gender || 'male' as 'male' | 'female' | 'other',
+    height: user?.height?.toString() || '',
+    weight: user?.weight?.toString() || '',
+    goal: user?.goal || 'maintenance' as 'bulk' | 'cut' | 'recomp' | 'maintenance',
+  });
+
+  // Update form when user changes
+  useEffect(() => {
+    if (user) {
+      setProfileForm({
+        name: user.name || '',
+        age: user.age?.toString() || '',
+        gender: user.gender || 'male',
+        height: user.height?.toString() || '',
+        weight: user.weight?.toString() || '',
+        goal: user.goal || 'maintenance',
+      });
+    }
+  }, [user]);
 
   useFocusEffect(
     useCallback(() => {
@@ -76,16 +121,78 @@ export default function Settings() {
     transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
   });
 
+  // Handle profile save
+  const handleSaveProfile = async () => {
+    if (!user) return;
+    
+    try {
+      await syncUpdateUserToCloud(user.id, {
+        name: profileForm.name,
+        age: parseInt(profileForm.age) || user.age,
+        gender: profileForm.gender as UserType['gender'],
+        height: parseFloat(profileForm.height) || user.height,
+        weight: parseFloat(profileForm.weight) || user.weight,
+        goal: profileForm.goal as UserType['goal'],
+      });
+      setShowProfileEdit(false);
+    } catch (error) {
+      console.error('Failed to update profile:', error);
+      Alert.alert('Error', 'Failed to update profile. Please try again.');
+    }
+  };
+
+  // Handle sign out
+  const handleSignOut = async () => {
+    Alert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await supabase.auth.signOut();
+              resetStore();
+              router.replace('/onboarding');
+            } catch (error) {
+              console.error('Sign out error:', error);
+              // Still reset store and redirect even if signOut fails
+              resetStore();
+              router.replace('/onboarding');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const [showMacroCalc, setShowMacroCalc] = useState(false);
   const [showInventory, setShowInventory] = useState(false);
   const [showBlacklist, setShowBlacklist] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState('');
 
-  // Notification toggles
-  const [workoutReminders, setWorkoutReminders] = useState(true);
-  const [restTimerSound, setRestTimerSound] = useState(true);
-  const [progressUpdates, setProgressUpdates] = useState(true);
+  // Notification toggles - synced with store
+  const workoutReminders = settings.notifications.workoutReminders;
+  const restTimerSound = settings.notifications.restTimerSound;
+  const progressUpdates = settings.notifications.progressUpdates;
+
+  const handleNotificationChange = (key: 'workoutReminders' | 'restTimerSound' | 'progressUpdates', value: boolean) => {
+    updateSettings({
+      notifications: {
+        ...settings.notifications,
+        [key]: value,
+      },
+    });
+  };
+
+  // Blacklist from store
+  const blacklist = settings.blacklistedExercises;
+  const addBlacklistedExercise = useAppStore((s) => s.addBlacklistedExercise);
+  const removeBlacklistedExercise = useAppStore((s) => s.removeBlacklistedExercise);
+  const [searchExercise, setSearchExercise] = useState('');
 
   // Macro calculator state
   const [macroForm, setMacroForm] = useState({
@@ -117,10 +224,6 @@ export default function Settings() {
       2.5: 2,
     } as Record<number, number>,
   });
-
-  // Blacklist state
-  const [blacklist, setBlacklist] = useState(['Deadlift', 'Barbell Row']);
-  const [searchExercise, setSearchExercise] = useState('');
 
   const calculateMacros = () => {
     const { age, gender, weight, height, activity, goal } = macroForm;
@@ -190,16 +293,26 @@ export default function Settings() {
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Profile
             </Text>
-            <GlassCard className="flex-row items-center gap-4">
-              <View className="w-14 h-14 rounded-full bg-primary flex items-center justify-center">
-                <User size={28} color="#FFFFFF" />
-              </View>
-              <View className="flex-1">
-                <Text className="font-bold text-foreground">Athlete</Text>
-                <Text className="text-sm text-muted-foreground">athlete@example.com</Text>
-              </View>
-              <ChevronRight size={20} color="#71717A" />
-            </GlassCard>
+            <Pressable
+              onPress={() => setShowProfileEdit(true)}
+              style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+            >
+              <GlassCard className="flex-row items-center gap-4">
+                <View className="w-14 h-14 rounded-full bg-primary flex items-center justify-center">
+                  <User size={28} color="#FFFFFF" />
+                </View>
+                <View className="flex-1">
+                  <Text className="font-bold text-foreground">{user?.name || 'Athlete'}</Text>
+                  <Text className="text-sm text-muted-foreground">{user?.email || 'No email set'}</Text>
+                  {user?.goal && (
+                    <Text className="text-xs text-primary capitalize mt-0.5">
+                      Goal: {user.goal.replace('-', ' ')}
+                    </Text>
+                  )}
+                </View>
+                <Edit3 size={20} color="#71717A" />
+              </GlassCard>
+            </Pressable>
           </Animated.View>
 
           {/* Gym & Training Section */}
@@ -271,7 +384,7 @@ export default function Settings() {
                 </View>
                 <Switch 
                   value={workoutReminders}
-                  onValueChange={setWorkoutReminders}
+                  onValueChange={(value) => handleNotificationChange('workoutReminders', value)}
                 />
               </View>
               <View className="flex-row items-center justify-between">
@@ -281,7 +394,7 @@ export default function Settings() {
                 </View>
                 <Switch 
                   value={restTimerSound}
-                  onValueChange={setRestTimerSound}
+                  onValueChange={(value) => handleNotificationChange('restTimerSound', value)}
                 />
               </View>
               <View className="flex-row items-center justify-between">
@@ -291,7 +404,7 @@ export default function Settings() {
                 </View>
                 <Switch 
                   value={progressUpdates}
-                  onValueChange={setProgressUpdates}
+                  onValueChange={(value) => handleNotificationChange('progressUpdates', value)}
                 />
               </View>
             </GlassCard>
@@ -356,6 +469,19 @@ export default function Settings() {
               </GlassCard>
 
               <Pressable
+                onPress={handleSignOut}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <LogOut size={20} color="#F59E0B" />
+                    <Text className="text-foreground">Sign Out</Text>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
+                </GlassCard>
+              </Pressable>
+
+              <Pressable
                 onPress={() => setShowDeleteConfirm(true)}
                 style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
               >
@@ -371,6 +497,114 @@ export default function Settings() {
           </Animated.View>
         </View>
       </ScrollView>
+
+      {/* Profile Edit Modal */}
+      <Dialog open={showProfileEdit} onOpenChange={setShowProfileEdit}>
+        <DialogContent>
+          <DialogHeader onClose={() => setShowProfileEdit(false)}>
+            <View className="flex-row items-center gap-2">
+              <Edit3 size={20} color="#31D5E3" />
+              <DialogTitle>Edit Profile</DialogTitle>
+            </View>
+            <DialogDescription>
+              Update your profile information
+            </DialogDescription>
+          </DialogHeader>
+          
+          <View className="gap-4 py-4">
+            <View>
+              <Label>Name</Label>
+              <Input 
+                value={profileForm.name}
+                onChangeText={(text) => setProfileForm({ ...profileForm, name: text })}
+                placeholder="Your name"
+                className="mt-1"
+              />
+            </View>
+
+            <View className="flex-row gap-4">
+              <View className="flex-1">
+                <Label>Age</Label>
+                <Input 
+                  value={profileForm.age}
+                  onChangeText={(text) => setProfileForm({ ...profileForm, age: text })}
+                  placeholder="25"
+                  keyboardType="numeric"
+                  className="mt-1"
+                />
+              </View>
+              <View className="flex-1">
+                <Label>Gender</Label>
+                <Select 
+                  value={profileForm.gender} 
+                  onValueChange={(v) => setProfileForm({ ...profileForm, gender: v as 'male' | 'female' | 'other' })}
+                >
+                  <SelectTrigger className="mt-1">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="male">Male</SelectItem>
+                    <SelectItem value="female">Female</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </View>
+            </View>
+
+            <View className="flex-row gap-4">
+              <View className="flex-1">
+                <Label>Height (in)</Label>
+                <Input 
+                  value={profileForm.height}
+                  onChangeText={(text) => setProfileForm({ ...profileForm, height: text })}
+                  placeholder="70"
+                  keyboardType="numeric"
+                  className="mt-1"
+                />
+              </View>
+              <View className="flex-1">
+                <Label>Weight (lbs)</Label>
+                <Input 
+                  value={profileForm.weight}
+                  onChangeText={(text) => setProfileForm({ ...profileForm, weight: text })}
+                  placeholder="180"
+                  keyboardType="numeric"
+                  className="mt-1"
+                />
+              </View>
+            </View>
+
+            <View>
+              <Label>Fitness Goal</Label>
+              <Select 
+                value={profileForm.goal} 
+                onValueChange={(v) => setProfileForm({ ...profileForm, goal: v as 'bulk' | 'cut' | 'recomp' | 'maintenance' })}
+              >
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="bulk">Build Muscle</SelectItem>
+                  <SelectItem value="cut">Lose Fat</SelectItem>
+                  <SelectItem value="maintenance">Maintain</SelectItem>
+                  <SelectItem value="recomp">Recomposition</SelectItem>
+                </SelectContent>
+              </Select>
+            </View>
+
+            <Button 
+              className="w-full mt-2"
+              onPress={handleSaveProfile}
+              disabled={isLoading}
+            >
+              <Save size={16} color="#FFFFFF" />
+              <Text className="text-white font-medium ml-2">
+                {isLoading ? 'Saving...' : 'Save Changes'}
+              </Text>
+            </Button>
+          </View>
+        </DialogContent>
+      </Dialog>
 
       {/* Macro Calculator Modal */}
       <Dialog open={showMacroCalc} onOpenChange={setShowMacroCalc}>
@@ -619,7 +853,7 @@ export default function Settings() {
                 <View key={exercise} className="flex-row items-center justify-between p-3 rounded-lg bg-destructive/10 border border-destructive/20">
                   <Text className="text-foreground">{exercise}</Text>
                   <Pressable 
-                    onPress={() => setBlacklist(blacklist.filter((e) => e !== exercise))}
+                    onPress={() => removeBlacklistedExercise(exercise)}
                     style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
                   >
                     <X size={16} color="#EF4444" />
@@ -639,7 +873,7 @@ export default function Settings() {
               className="w-full"
               onPress={() => {
                 if (searchExercise && !blacklist.includes(searchExercise)) {
-                  setBlacklist([...blacklist, searchExercise]);
+                  addBlacklistedExercise(searchExercise);
                   setSearchExercise('');
                 }
               }}
