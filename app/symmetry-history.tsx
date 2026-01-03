@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { View, Text, ScrollView, Pressable, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useAppStore } from '@/store/useAppStore';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -11,142 +12,180 @@ import {
   Sparkles,
   ArrowUp,
   ArrowDown,
+  Minus,
   Calendar,
-  Target
+  Target,
+  Camera,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
+import type { PhysiqueScan } from '@/types';
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64;
 
-// Mock historical data
-const symmetryHistory = [
-  { date: 'Aug', score: 65, x: 1 },
-  { date: 'Sep', score: 68, x: 2 },
-  { date: 'Oct', score: 72, x: 3 },
-  { date: 'Nov', score: 76, x: 4 },
-  { date: 'Dec', score: 82, x: 5 },
-  { date: 'Jan', score: 85, x: 6 },
-];
-
-const muscleHistoryData = {
-  chest: [
-    { date: 'Oct', score: 85, x: 1 },
-    { date: 'Nov', score: 88, x: 2 },
-    { date: 'Dec', score: 90, x: 3 },
-    { date: 'Jan', score: 92, x: 4 },
-  ],
-  back: [
-    { date: 'Oct', score: 78, x: 1 },
-    { date: 'Nov', score: 80, x: 2 },
-    { date: 'Dec', score: 83, x: 3 },
-    { date: 'Jan', score: 85, x: 4 },
-  ],
-  shoulders: [
-    { date: 'Oct', score: 75, x: 1 },
-    { date: 'Nov', score: 78, x: 2 },
-    { date: 'Dec', score: 81, x: 3 },
-    { date: 'Jan', score: 83, x: 4 },
-  ],
-  arms: [
-    { date: 'Oct', score: 68, x: 1 },
-    { date: 'Nov', score: 70, x: 2 },
-    { date: 'Dec', score: 73, x: 3 },
-    { date: 'Jan', score: 76, x: 4 },
-  ],
-  legs: [
-    { date: 'Oct', score: 82, x: 1 },
-    { date: 'Nov', score: 84, x: 2 },
-    { date: 'Dec', score: 85, x: 3 },
-    { date: 'Jan', score: 85, x: 4 },
-  ],
-  abs: [
-    { date: 'Oct', score: 58, x: 1 },
-    { date: 'Nov', score: 62, x: 2 },
-    { date: 'Dec', score: 65, x: 3 },
-    { date: 'Jan', score: 68, x: 4 },
-  ],
+// Muscle display name mapping
+const MUSCLE_DISPLAY_NAMES: Record<string, string> = {
+  chest: 'Chest',
+  back: 'Back (Lats)',
+  shoulders: 'Shoulders',
+  arms: 'Arms',
+  legs: 'Legs',
 };
 
-const scanHistory = [
-  { 
-    date: 'Jan 5, 2026', 
-    score: 85, 
-    change: 3,
-    muscles: [
-      { muscle: 'Chest', status: 'strong', score: 92 },
-      { muscle: 'Back (Lats)', status: 'balanced', score: 85 },
-      { muscle: 'Shoulders', status: 'balanced', score: 83 },
-      { muscle: 'Left Bicep', status: 'lagging', score: 72 },
-      { muscle: 'Right Bicep', status: 'strong', score: 80 },
-      { muscle: 'Left Quad', status: 'balanced', score: 86 },
-      { muscle: 'Right Quad', status: 'balanced', score: 84 },
-      { muscle: 'Abs', status: 'lagging', score: 68 },
-    ]
-  },
-  { 
-    date: 'Dec 20, 2025', 
-    score: 82, 
-    change: 3,
-    muscles: [
-      { muscle: 'Chest', status: 'strong', score: 90 },
-      { muscle: 'Back (Lats)', status: 'balanced', score: 83 },
-      { muscle: 'Shoulders', status: 'balanced', score: 81 },
-      { muscle: 'Left Bicep', status: 'lagging', score: 70 },
-      { muscle: 'Right Bicep', status: 'balanced', score: 78 },
-      { muscle: 'Left Quad', status: 'balanced', score: 84 },
-      { muscle: 'Right Quad', status: 'balanced', score: 83 },
-      { muscle: 'Abs', status: 'lagging', score: 65 },
-    ]
-  },
-  { 
-    date: 'Dec 13, 2025', 
-    score: 79, 
-    change: 4,
-    muscles: [
-      { muscle: 'Chest', status: 'balanced', score: 88 },
-      { muscle: 'Back (Lats)', status: 'balanced', score: 80 },
-      { muscle: 'Shoulders', status: 'balanced', score: 78 },
-      { muscle: 'Left Bicep', status: 'lagging', score: 68 },
-      { muscle: 'Right Bicep', status: 'balanced', score: 76 },
-      { muscle: 'Left Quad', status: 'balanced', score: 82 },
-      { muscle: 'Right Quad', status: 'balanced', score: 80 },
-      { muscle: 'Abs', status: 'lagging', score: 62 },
-    ]
-  },
-  { 
-    date: 'Nov 29, 2025', 
-    score: 75, 
-    change: 3,
-    muscles: [
-      { muscle: 'Chest', status: 'balanced', score: 85 },
-      { muscle: 'Back (Lats)', status: 'balanced', score: 78 },
-      { muscle: 'Shoulders', status: 'balanced', score: 75 },
-      { muscle: 'Left Bicep', status: 'lagging', score: 65 },
-      { muscle: 'Right Bicep', status: 'balanced', score: 74 },
-      { muscle: 'Left Quad', status: 'balanced', score: 80 },
-      { muscle: 'Right Quad', status: 'balanced', score: 78 },
-      { muscle: 'Abs', status: 'lagging', score: 58 },
-    ]
-  },
-];
+// Get status based on score threshold
+function getScoreStatus(score: number): 'strong' | 'balanced' | 'lagging' {
+  if (score >= 90) return 'strong';
+  if (score >= 75) return 'balanced';
+  return 'lagging';
+}
 
-const currentMuscleAnalysis = [
-  { muscle: 'Chest', status: 'strong', score: 92, trend: 2 },
-  { muscle: 'Back (Lats)', status: 'balanced', score: 85, trend: 2 },
-  { muscle: 'Shoulders', status: 'balanced', score: 83, trend: 2 },
-  { muscle: 'Left Bicep', status: 'lagging', score: 72, trend: 2 },
-  { muscle: 'Right Bicep', status: 'strong', score: 80, trend: 2 },
-  { muscle: 'Left Quad', status: 'balanced', score: 86, trend: 2 },
-  { muscle: 'Right Quad', status: 'balanced', score: 84, trend: 1 },
-  { muscle: 'Abs', status: 'lagging', score: 68, trend: 3 },
-];
+// Format date for display
+function formatScanDate(date: Date | string): string {
+  const d = new Date(date);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// Format date for chart label
+function formatChartDate(date: Date | string): string {
+  const d = new Date(date);
+  return d.toLocaleDateString('en-US', { month: 'short' });
+}
+
+// Transform physique scans for chart data
+function transformToChartData(scans: PhysiqueScan[]) {
+  // Sort ascending by date for chart (oldest first)
+  const sorted = [...scans].sort((a, b) => 
+    new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  
+  return sorted.map((scan, index) => ({
+    value: scan.symmetryScore,
+    label: formatChartDate(scan.date),
+    date: scan.date,
+  }));
+}
+
+// Transform scans for history list (sorted descending - newest first)
+function transformToHistoryList(scans: PhysiqueScan[]) {
+  const sorted = [...scans].sort((a, b) => 
+    new Date(b.date).getTime() - new Date(a.date).getTime()
+  );
+
+  return sorted.map((scan, index) => {
+    const prevScan = sorted[index + 1];
+    const change = prevScan ? scan.symmetryScore - prevScan.symmetryScore : 0;
+    
+    const muscles = Object.entries(scan.muscleScores).map(([key, score]) => ({
+      muscle: MUSCLE_DISPLAY_NAMES[key] || key,
+      status: getScoreStatus(score),
+      score,
+    }));
+
+    return {
+      id: scan.id,
+      date: formatScanDate(scan.date),
+      rawDate: scan.date,
+      score: scan.symmetryScore,
+      change,
+      muscles,
+    };
+  });
+}
+
+// Get current muscle analysis from latest scan with trends
+function getCurrentMuscleAnalysis(scans: PhysiqueScan[]) {
+  if (scans.length === 0) return [];
+  
+  const sorted = [...scans].sort((a, b) => 
+    new Date(b.date).getTime() - new Date(a.date).getTime()
+  );
+  
+  const latestScan = sorted[0];
+  const prevScan = sorted[1];
+
+  return Object.entries(latestScan.muscleScores).map(([key, score]) => {
+    const prevScore = prevScan?.muscleScores?.[key as keyof typeof prevScan.muscleScores] || score;
+    const trend = score - prevScore;
+    
+    return {
+      muscle: MUSCLE_DISPLAY_NAMES[key] || key,
+      key,
+      status: getScoreStatus(score),
+      score,
+      trend,
+    };
+  });
+}
+
+// Get per-muscle history for charts
+function getMuscleHistoryData(scans: PhysiqueScan[]) {
+  if (scans.length === 0) return {};
+  
+  const sorted = [...scans].sort((a, b) => 
+    new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+
+  const muscleKeys = Object.keys(sorted[0].muscleScores) as (keyof PhysiqueScan['muscleScores'])[];
+  
+  const result: Record<string, { value: number; label: string }[]> = {};
+  
+  for (const key of muscleKeys) {
+    result[key] = sorted.map(scan => ({
+      value: scan.muscleScores[key],
+      label: formatChartDate(scan.date),
+    }));
+  }
+  
+  return result;
+}
+
+// Count muscles by status
+function countMusclesByStatus(muscleScores: PhysiqueScan['muscleScores']) {
+  const counts = { strong: 0, balanced: 0, lagging: 0 };
+  
+  Object.values(muscleScores).forEach(score => {
+    const status = getScoreStatus(score);
+    counts[status]++;
+  });
+  
+  return counts;
+}
 
 export default function SymmetryHistory() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState('overview');
-  const [selectedScan, setSelectedScan] = useState<typeof scanHistory[0] | null>(null);
+  const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
+
+  // Connect to store
+  const physiqueScans = useAppStore((state) => state.physiqueScans);
+
+  // Derive all data from physiqueScans
+  const chartData = useMemo(() => transformToChartData(physiqueScans), [physiqueScans]);
+  const historyList = useMemo(() => transformToHistoryList(physiqueScans), [physiqueScans]);
+  const muscleAnalysis = useMemo(() => getCurrentMuscleAnalysis(physiqueScans), [physiqueScans]);
+  const muscleHistory = useMemo(() => getMuscleHistoryData(physiqueScans), [physiqueScans]);
+
+  // Get current and first scan stats
+  const latestScan = physiqueScans.length > 0 
+    ? [...physiqueScans].sort((a, b) => 
+        new Date(b.date).getTime() - new Date(a.date).getTime()
+      )[0] 
+    : null;
+
+  const firstScan = physiqueScans.length > 0
+    ? [...physiqueScans].sort((a, b) =>
+        new Date(a.date).getTime() - new Date(b.date).getTime()
+      )[0]
+    : null;
+
+  const totalImprovement = latestScan && firstScan 
+    ? latestScan.symmetryScore - firstScan.symmetryScore 
+    : 0;
+
+  const statusCounts = latestScan 
+    ? countMusclesByStatus(latestScan.muscleScores)
+    : { strong: 0, balanced: 0, lagging: 0 };
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -165,6 +204,51 @@ export default function SymmetryHistory() {
       default: return 'bg-muted';
     }
   };
+
+  // Empty state - no scans yet
+  if (physiqueScans.length === 0) {
+    return (
+      <SafeAreaView edges={['top']} className="flex-1 bg-background">
+        <View className="px-4 py-6">
+          {/* Header */}
+          <View className="flex-row items-center gap-3 mb-6">
+            <Button 
+              variant="ghost" 
+              size="icon"
+              onPress={() => router.push('/(tabs)/progress')}
+              className="shrink-0"
+            >
+              <ArrowLeft size={20} color="#A1A1AA" />
+            </Button>
+            <View>
+              <Text className="text-2xl font-bold text-foreground">Symmetry Analysis</Text>
+              <Text className="text-muted-foreground text-sm">Track your muscle balance over time</Text>
+            </View>
+          </View>
+
+          {/* Empty State */}
+          <View className="flex-1 items-center justify-center py-24">
+            <GlassCard variant="glow" glowColor="primary" className="items-center p-8 w-full">
+              <View className="w-16 h-16 rounded-full bg-primary/20 items-center justify-center mb-4">
+                <Camera size={32} color="#31D5E3" />
+              </View>
+              <Text className="text-xl font-bold text-foreground mb-2">No Scans Yet</Text>
+              <Text className="text-muted-foreground text-center text-sm mb-6">
+                Start your first physique scan to track muscle symmetry and balance over time.
+              </Text>
+              <Button 
+                variant="default"
+                onPress={() => router.push('/physique-scan')}
+                className="w-full"
+              >
+                <Text className="text-primary-foreground font-semibold">Start First Scan</Text>
+              </Button>
+            </GlassCard>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
@@ -196,7 +280,9 @@ export default function SymmetryHistory() {
                     Current Score
                   </Text>
                 </View>
-                <Text className="text-xs text-muted-foreground mt-0.5">Last scan: Jan 5, 2026</Text>
+                <Text className="text-xs text-muted-foreground mt-0.5">
+                  Last scan: {latestScan ? formatScanDate(latestScan.date) : 'N/A'}
+                </Text>
               </View>
               <Button 
                 variant="outline" 
@@ -209,14 +295,23 @@ export default function SymmetryHistory() {
             
             <View className="flex-row items-end justify-between">
               <View className="flex-row items-end">
-                <Text className="text-5xl font-bold text-primary">85</Text>
+                <Text className="text-5xl font-bold text-primary">
+                  {latestScan?.symmetryScore ?? 0}
+                </Text>
                 <Text className="text-2xl text-muted-foreground ml-1">/100</Text>
               </View>
               <View className="items-end">
                 <View className="flex-row items-center gap-1">
-                  <ArrowUp size={16} color="#4ADE80" />
-                  <Text className="text-success text-sm font-medium">
-                    +20 pts
+                  {totalImprovement >= 0 ? (
+                    <ArrowUp size={16} color="#4ADE80" />
+                  ) : (
+                    <ArrowDown size={16} color="#EF4444" />
+                  )}
+                  <Text className={cn(
+                    "text-sm font-medium",
+                    totalImprovement >= 0 ? "text-success" : "text-destructive"
+                  )}>
+                    {totalImprovement >= 0 ? '+' : ''}{totalImprovement} pts
                   </Text>
                 </View>
                 <Text className="text-xs text-muted-foreground">since first scan</Text>
@@ -225,15 +320,15 @@ export default function SymmetryHistory() {
 
             <View className="flex-row justify-between mt-6 pt-4 border-t border-border">
               <View className="items-center flex-1">
-                <Text className="text-lg font-bold text-success">4</Text>
+                <Text className="text-lg font-bold text-success">{statusCounts.strong}</Text>
                 <Text className="text-xs text-muted-foreground">Strong</Text>
               </View>
               <View className="items-center flex-1">
-                <Text className="text-lg font-bold text-primary">3</Text>
+                <Text className="text-lg font-bold text-primary">{statusCounts.balanced}</Text>
                 <Text className="text-xs text-muted-foreground">Balanced</Text>
               </View>
               <View className="items-center flex-1">
-                <Text className="text-lg font-bold text-destructive">2</Text>
+                <Text className="text-lg font-bold text-destructive">{statusCounts.lagging}</Text>
                 <Text className="text-xs text-muted-foreground">Lagging</Text>
               </View>
             </View>
@@ -259,12 +354,12 @@ export default function SymmetryHistory() {
                 <GlassCard className="p-0 overflow-hidden pb-4">
                   <View className="items-center justify-center pt-4">
                     <LineChart
-                      data={symmetryHistory.map(d => ({ value: d.score, label: d.date }))}
+                      data={chartData}
                       curved
                       areaChart
                       height={200}
                       width={chartWidth}
-                      spacing={45}
+                      spacing={chartData.length > 1 ? Math.min(45, (chartWidth - 30) / (chartData.length - 1)) : 45}
                       initialSpacing={15}
                       color="#31D5E3"
                       thickness={3}
@@ -314,8 +409,8 @@ export default function SymmetryHistory() {
                   <Text className="text-lg font-semibold text-foreground">Current Analysis</Text>
                 </View>
                 <View className="gap-2">
-                  {currentMuscleAnalysis.map((muscle) => (
-                    <GlassCard key={muscle.muscle} className="flex-row items-center justify-between py-3">
+                  {muscleAnalysis.map((muscle) => (
+                    <GlassCard key={muscle.key} className="flex-row items-center justify-between py-3">
                       <View className="flex-row items-center gap-3">
                         <View className={cn(
                           'w-3 h-3 rounded-full',
@@ -326,12 +421,27 @@ export default function SymmetryHistory() {
                         <Text className="font-medium text-sm text-foreground">{muscle.muscle}</Text>
                       </View>
                       <View className="flex-row items-center gap-3">
-                        <View className="flex-row items-center gap-0.5">
-                          <ArrowUp size={12} color="#4ADE80" />
-                          <Text className="text-xs text-success">
-                            +{muscle.trend}
-                          </Text>
-                        </View>
+                        {muscle.trend !== 0 && (
+                          <View className="flex-row items-center gap-0.5">
+                            {muscle.trend > 0 ? (
+                              <>
+                                <ArrowUp size={12} color="#4ADE80" />
+                                <Text className="text-xs text-success">+{muscle.trend}</Text>
+                              </>
+                            ) : (
+                              <>
+                                <ArrowDown size={12} color="#EF4444" />
+                                <Text className="text-xs text-destructive">{muscle.trend}</Text>
+                              </>
+                            )}
+                          </View>
+                        )}
+                        {muscle.trend === 0 && (
+                          <View className="flex-row items-center gap-0.5">
+                            <Minus size={12} color="#A1A1AA" />
+                            <Text className="text-xs text-muted-foreground">0</Text>
+                          </View>
+                        )}
                         <View className={cn(
                           'px-2 py-0.5 rounded min-w-[40px] items-center',
                           getStatusBg(muscle.status)
@@ -352,34 +462,40 @@ export default function SymmetryHistory() {
 
             {/* Muscles Tab */}
             <TabsContent value="muscles" className="gap-6">
-              {Object.entries(muscleHistoryData).map(([muscle, data]) => (
-                <View key={muscle}>
+              {Object.entries(muscleHistory).map(([muscleKey, data]) => (
+                <View key={muscleKey}>
                   <View className="flex-row items-center justify-between mb-2">
-                    <Text className="text-sm font-semibold capitalize text-foreground">{muscle}</Text>
+                    <Text className="text-sm font-semibold text-foreground">
+                      {MUSCLE_DISPLAY_NAMES[muscleKey] || muscleKey}
+                    </Text>
                     <Text className="text-xs text-muted-foreground">
-                      Current: <Text className="text-foreground font-medium">{data[data.length - 1].score}</Text>
+                      Current: <Text className="text-foreground font-medium">
+                        {data.length > 0 ? data[data.length - 1].value : 'N/A'}
+                      </Text>
                     </Text>
                   </View>
                   <GlassCard className="py-3">
                     <View className="h-24">
-                      <LineChart
-                        data={data.map(d => ({ value: d.score }))} 
-                        curved
-                        areaChart
-                        height={80}
-                        width={chartWidth - 40}
-                        spacing={data.length > 3 ? 60 : 80}
-                        initialSpacing={10}
-                        color="#31D5E3"
-                        thickness={2}
-                        startFillColor="#31D5E3"
-                        endFillColor="#31D5E3"
-                        startOpacity={0.2}
-                        endOpacity={0.02}
-                        hideDataPoints
-                        hideAxesAndRules
-                        backgroundColor="transparent"
-                      />
+                      {data.length > 0 && (
+                        <LineChart
+                          data={data}
+                          curved
+                          areaChart
+                          height={80}
+                          width={chartWidth - 40}
+                          spacing={data.length > 3 ? Math.min(60, (chartWidth - 50) / (data.length - 1)) : 80}
+                          initialSpacing={10}
+                          color="#31D5E3"
+                          thickness={2}
+                          startFillColor="#31D5E3"
+                          endFillColor="#31D5E3"
+                          startOpacity={0.2}
+                          endOpacity={0.02}
+                          hideDataPoints
+                          hideAxesAndRules
+                          backgroundColor="transparent"
+                        />
+                      )}
                     </View>
                   </GlassCard>
                 </View>
@@ -393,10 +509,10 @@ export default function SymmetryHistory() {
                 <Text className="text-lg font-semibold text-foreground">Scan History</Text>
               </View>
 
-              {scanHistory.map((scan) => (
+              {historyList.map((scan) => (
                 <Pressable
-                  key={scan.date}
-                  onPress={() => setSelectedScan(selectedScan?.date === scan.date ? null : scan)}
+                  key={scan.id}
+                  onPress={() => setSelectedScanId(selectedScanId === scan.id ? null : scan.id)}
                   style={({ pressed }) => ({
                     opacity: pressed ? 0.7 : 1,
                   })}
@@ -405,21 +521,30 @@ export default function SymmetryHistory() {
                     <View className="flex-row items-center justify-between">
                       <View>
                         <Text className="font-medium text-foreground">{scan.date}</Text>
-                        <Text className="text-xs text-muted-foreground">Front Double Bicep</Text>
+                        <Text className="text-xs text-muted-foreground">Physique Scan</Text>
                       </View>
                       <View className="flex-row items-center gap-3">
-                        <View className="flex-row items-center gap-0.5">
-                          <ArrowUp size={12} color="#4ADE80" />
-                          <Text className="text-success text-xs font-medium">
-                            +{scan.change}
-                          </Text>
-                        </View>
+                        {scan.change !== 0 && (
+                          <View className="flex-row items-center gap-0.5">
+                            {scan.change > 0 ? (
+                              <>
+                                <ArrowUp size={12} color="#4ADE80" />
+                                <Text className="text-success text-xs font-medium">+{scan.change}</Text>
+                              </>
+                            ) : (
+                              <>
+                                <ArrowDown size={12} color="#EF4444" />
+                                <Text className="text-destructive text-xs font-medium">{scan.change}</Text>
+                              </>
+                            )}
+                          </View>
+                        )}
                         <Text className="text-2xl font-bold text-primary">{scan.score}</Text>
                       </View>
                     </View>
 
                     {/* Expanded Details */}
-                    {selectedScan?.date === scan.date && (
+                    {selectedScanId === scan.id && (
                       <View className="mt-4 pt-4 border-t border-border">
                         <Text className="text-xs text-muted-foreground uppercase tracking-wide mb-3">
                           Muscle Breakdown
