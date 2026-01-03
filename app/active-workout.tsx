@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput } from 'react-native';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { View, Text, ScrollView, Pressable, TextInput, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle } from 'react-native-svg';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { useAppStore } from '@/store/useAppStore';
+import { getCurrentWeekCalendar } from '@/utils/workoutCalendar';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,9 +27,12 @@ import {
   Flame,
   Dumbbell,
   ChevronRight,
+  Trophy,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+import type { Exercise as ExerciseType, WorkoutDay } from '@/types';
 
+// Extended set data for tracking during workout
 interface SetData {
   id: number;
   weight: string;
@@ -39,9 +44,12 @@ interface SetData {
   prevReps?: number;
 }
 
+// Extended exercise data for workout session
 interface ExerciseData {
   id: string;
   name: string;
+  muscleGroup: string;
+  equipment: string;
   targetSets: number;
   targetReps: string;
   restSeconds: number;
@@ -50,84 +58,133 @@ interface ExerciseData {
   notes?: string;
 }
 
-const initialExercises: ExerciseData[] = [
-  {
-    id: '1',
-    name: 'Barbell Bench Press',
-    targetSets: 4,
-    targetReps: '6-8',
-    restSeconds: 180,
-    sets: [
-      { id: 1, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 85, prevReps: 8 },
-      { id: 2, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 85, prevReps: 7 },
-      { id: 3, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 85, prevReps: 6 },
-      { id: 4, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 85, prevReps: 6 },
-    ],
-  },
-  {
-    id: '2',
-    name: 'Incline Dumbbell Press',
-    targetSets: 4,
-    targetReps: '8-12',
-    restSeconds: 120,
-    supersetId: 'ss1',
-    sets: [
-      { id: 1, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 30, prevReps: 10 },
-      { id: 2, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 30, prevReps: 10 },
-      { id: 3, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 30, prevReps: 9 },
-      { id: 4, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 27.5, prevReps: 8 },
-    ],
-  },
-  {
-    id: '3',
-    name: 'Cable Flyes',
-    targetSets: 3,
-    targetReps: '12-15',
-    restSeconds: 90,
-    supersetId: 'ss1',
-    sets: [
-      { id: 1, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 12.5, prevReps: 15 },
-      { id: 2, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 12.5, prevReps: 14 },
-      { id: 3, weight: '', reps: '', completed: false, isWarmup: false, tags: [], prevWeight: 12.5, prevReps: 12 },
-    ],
-  },
-];
+// Convert plan exercises to workout session format
+function convertToSessionExercises(exercises: ExerciseType[]): ExerciseData[] {
+  return exercises.map((ex) => ({
+    id: ex.id,
+    name: ex.name,
+    muscleGroup: ex.muscleGroup,
+    equipment: ex.equipment,
+    targetSets: ex.sets,
+    targetReps: ex.reps,
+    restSeconds: ex.restSeconds,
+    notes: ex.notes,
+    sets: Array.from({ length: ex.sets }, (_, i) => ({
+      id: i + 1,
+      weight: '',
+      reps: '',
+      completed: false,
+      isWarmup: false,
+      tags: [],
+      // In a real app, these would come from workout history
+      prevWeight: undefined,
+      prevReps: undefined,
+    })),
+  }));
+}
 
 export default function ActiveWorkout() {
   const router = useRouter();
+  
+  // Store connections
+  const {
+    activeWorkout,
+    workoutPlans,
+    settings,
+    endWorkout,
+    toggleWarmupMode,
+    toggleDeloadMode,
+    startRestTimer,
+    updateRestTimer,
+    stopRestTimer,
+    setCurrentExercise,
+  } = useAppStore();
+
+  // Local state
   const [elapsedTime, setElapsedTime] = useState(0);
-  const [exercises, setExercises] = useState<ExerciseData[]>(initialExercises);
-  const [warmupMode, setWarmupMode] = useState(false);
-  const [deloadMode, setDeloadMode] = useState(false);
-  const [showRestTimer, setShowRestTimer] = useState(false);
-  const [restTime, setRestTime] = useState(0);
-  const [targetRestTime, setTargetRestTime] = useState(90);
+  const [exercises, setExercises] = useState<ExerciseData[]>([]);
   const [showPlateCalc, setShowPlateCalc] = useState(false);
   const [calcWeight, setCalcWeight] = useState('');
-  const [unit, setUnit] = useState<'kg' | 'lbs'>('kg');
+  const [unit, setUnit] = useState<'kg' | 'lbs'>(settings.unit === 'kg' ? 'kg' : 'lbs');
   const [showMenu, setShowMenu] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseData | null>(null);
   const [showExerciseDetail, setShowExerciseDetail] = useState(false);
   const [historyExerciseId, setHistoryExerciseId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [showCompletionModal, setShowCompletionModal] = useState(false);
 
-  // Session timer
+  // Resolve current workout plan and day
+  const { currentPlan, currentDay } = useMemo(() => {
+    if (!activeWorkout.isActive || !activeWorkout.workoutId) {
+      return { currentPlan: null, currentDay: null };
+    }
+
+    // Find the active workout plan
+    const plan = workoutPlans.find((p) => p.id === activeWorkout.workoutId);
+    if (!plan) {
+      return { currentPlan: null, currentDay: null };
+    }
+
+    // Determine today's workout day using the calendar utility
+    const calendarDays = getCurrentWeekCalendar(plan);
+    const today = new Date();
+    const todayCalendarDay = calendarDays.find(
+      (day) =>
+        day.fullDate.getDate() === today.getDate() &&
+        day.fullDate.getMonth() === today.getMonth() &&
+        day.fullDate.getFullYear() === today.getFullYear()
+    );
+
+    // Get the workout day (or fallback to first day if not scheduled)
+    const workoutDay = todayCalendarDay?.workoutDay || plan.workoutDays[0] || null;
+
+    return { currentPlan: plan, currentDay: workoutDay };
+  }, [activeWorkout, workoutPlans]);
+
+  // Redirect if no active workout
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeWorkout.isActive || !activeWorkout.workoutId) {
+        // No active workout, redirect to dashboard
+        router.replace('/(tabs)');
+      }
+    }, [activeWorkout.isActive, activeWorkout.workoutId, router])
+  );
+
+  // Initialize exercises from current day
   useEffect(() => {
+    if (currentDay?.exercises && currentDay.exercises.length > 0) {
+      setExercises(convertToSessionExercises(currentDay.exercises));
+    }
+  }, [currentDay]);
+
+  // Calculate elapsed time from startTime
+  useEffect(() => {
+    if (!activeWorkout.startTime) return;
+
     const interval = setInterval(() => {
-      setElapsedTime((prev) => prev + 1);
+      const start = new Date(activeWorkout.startTime!).getTime();
+      const now = Date.now();
+      setElapsedTime(Math.floor((now - start) / 1000));
     }, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeWorkout.startTime]);
 
-  // Rest timer
+  // Rest timer effect - connected to store
   useEffect(() => {
-    if (showRestTimer && restTime < targetRestTime) {
-      const interval = setInterval(() => {
-        setRestTime((prev) => prev + 1);
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [showRestTimer, restTime, targetRestTime]);
+    if (!activeWorkout.restTimer.isRunning) return;
+
+    const interval = setInterval(() => {
+      const newElapsed = activeWorkout.restTimer.elapsedSeconds + 1;
+      if (newElapsed >= activeWorkout.restTimer.targetSeconds) {
+        stopRestTimer();
+      } else {
+        updateRestTimer(newElapsed);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeWorkout.restTimer.isRunning, activeWorkout.restTimer.elapsedSeconds, stopRestTimer, updateRestTimer]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -135,6 +192,42 @@ export default function ActiveWorkout() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Calculate workout stats
+  const workoutStats = useMemo(() => {
+    const totalSets = exercises.reduce((acc, ex) => acc + ex.sets.length, 0);
+    const completedSets = exercises.reduce(
+      (acc, ex) => acc + ex.sets.filter((s) => s.completed).length,
+      0
+    );
+    const totalVolume = exercises.reduce((acc, ex) => {
+      return acc + ex.sets.reduce((setAcc, set) => {
+        const weight = parseFloat(set.weight) || 0;
+        const reps = parseInt(set.reps) || 0;
+        return setAcc + weight * reps;
+      }, 0);
+    }, 0);
+    return { totalSets, completedSets, totalVolume };
+  }, [exercises]);
+
+  // Handle workout completion
+  const handleFinishWorkout = () => {
+    Alert.alert(
+      'Finish Workout',
+      `Complete ${workoutStats.completedSets}/${workoutStats.totalSets} sets logged. Finish this workout?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Finish',
+          onPress: () => {
+            endWorkout();
+            setShowCompletionModal(true);
+          },
+        },
+      ]
+    );
+  };
+
+  // Handle set completion - now uses store rest timer
   const handleSetComplete = (exerciseId: string, setId: number) => {
     setExercises((prev) =>
       prev.map((ex) =>
@@ -149,11 +242,10 @@ export default function ActiveWorkout() {
       )
     );
     
+    // Start rest timer via store
     const exercise = exercises.find((e) => e.id === exerciseId);
     if (exercise) {
-      setTargetRestTime(exercise.restSeconds);
-      setRestTime(0);
-      setShowRestTimer(true);
+      startRestTimer(exercise.restSeconds);
     }
   };
 
@@ -241,7 +333,19 @@ export default function ActiveWorkout() {
   };
 
   const circumference = 2 * Math.PI * 88;
-  const strokeDashoffset = circumference * (1 - restTime / targetRestTime);
+  const restProgress = activeWorkout.restTimer.targetSeconds > 0 
+    ? activeWorkout.restTimer.elapsedSeconds / activeWorkout.restTimer.targetSeconds 
+    : 0;
+  const strokeDashoffset = circumference * (1 - restProgress);
+
+  // Show loading if no workout data yet
+  if (!currentDay && activeWorkout.isActive) {
+    return (
+      <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
+        <Text className="text-muted-foreground">Loading workout...</Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
@@ -249,7 +353,20 @@ export default function ActiveWorkout() {
       <View className="border-b border-border bg-card">
         <View className="flex-row items-center justify-between px-4 py-3">
           <Pressable 
-            onPress={() => router.push('/(tabs)/workout-plan')}
+            onPress={() => {
+              Alert.alert(
+                'Leave Workout',
+                'Are you sure you want to leave? Your progress will be saved.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { 
+                    text: 'Leave', 
+                    style: 'destructive',
+                    onPress: () => router.push('/(tabs)/workout-plan')
+                  },
+                ]
+              );
+            }}
             className="p-2 -ml-2"
             style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
           >
@@ -271,21 +388,54 @@ export default function ActiveWorkout() {
         </View>
 
         <View className="px-4 pb-3">
-          <Text className="text-xl font-bold text-foreground">Push Day</Text>
-          <Text className="text-sm text-muted-foreground">Chest • Shoulders • Triceps</Text>
+          <Text className="text-xl font-bold text-foreground">
+            {currentDay?.name || 'Workout'}
+          </Text>
+          <Text className="text-sm text-muted-foreground">
+            {currentDay?.muscleGroups?.join(' • ') || 'No muscles targeted'}
+          </Text>
+          {/* Progress indicator */}
+          <View className="flex-row items-center gap-2 mt-2">
+            <View className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+              <View 
+                className="h-full bg-primary rounded-full" 
+                style={{ 
+                  width: `${workoutStats.totalSets > 0 
+                    ? (workoutStats.completedSets / workoutStats.totalSets) * 100 
+                    : 0}%` 
+                }} 
+              />
+            </View>
+            <Text className="text-xs text-muted-foreground">
+              {workoutStats.completedSets}/{workoutStats.totalSets}
+            </Text>
+          </View>
         </View>
       </View>
 
       <ScrollView className="flex-1">
         <View className="px-4 py-4 gap-4 pb-32">
-          {exercises.map((exercise, exIndex) => {
-            const isSuperset = exercise.supersetId;
-            const supersetNext = exercises[exIndex + 1]?.supersetId === exercise.supersetId;
+          {exercises.length === 0 ? (
+            <GlassCard className="items-center py-8">
+              <Dumbbell size={32} color="#71717A" />
+              <Text className="text-muted-foreground mt-2">No exercises in this workout</Text>
+              <Button 
+                variant="outline" 
+                className="mt-4"
+                onPress={() => router.push('/(tabs)/workout-plan')}
+              >
+                <Text className="text-foreground">Edit Workout Plan</Text>
+              </Button>
+            </GlassCard>
+          ) : (
+            exercises.map((exercise, exIndex) => {
+              const isSuperset = exercise.supersetId;
+              const supersetNext = exercises[exIndex + 1]?.supersetId === exercise.supersetId;
             
-            return (
-              <View key={exercise.id} className="relative">
-                {isSuperset && supersetNext && (
-                  <View className="absolute left-4 top-full w-0.5 h-4 bg-primary z-10" />
+              return (
+                <View key={exercise.id} className="relative">
+                  {isSuperset && supersetNext && (
+                    <View className="absolute left-4 top-full w-0.5 h-4 bg-primary z-10" />
                 )}
                 
                 <GlassCard className="overflow-hidden p-0">
@@ -322,7 +472,7 @@ export default function ActiveWorkout() {
                   </View>
 
                   {/* Warmup sets */}
-                  {warmupMode && exIndex === 0 && (
+                  {activeWorkout.warmupMode && exIndex === 0 && (
                     <>
                       {[0.5, 0.7, 0.9].map((pct, i) => (
                         <View key={`warmup-${i}`} className="flex-row px-4 py-3 items-center bg-muted/10 border-b border-border/30" style={{ opacity: 0.6 }}>
@@ -367,7 +517,7 @@ export default function ActiveWorkout() {
                     >
                       <Text className="w-[12%] text-sm font-medium text-foreground">{set.id}</Text>
                       <Text className="w-[28%] text-xs text-muted-foreground">
-                        {set.prevWeight} × {set.prevReps}
+                        {set.prevWeight ? `${set.prevWeight} × ${set.prevReps}` : '—'}
                       </Text>
                       <View className="w-[20%]">
                         <TextInput
@@ -375,7 +525,7 @@ export default function ActiveWorkout() {
                           value={set.weight}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'weight', text)}
                           className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
-                          placeholder={String(deloadMode ? Math.round((set.prevWeight || 0) * 0.6) : set.prevWeight)}
+                          placeholder={set.prevWeight ? String(activeWorkout.deloadMode ? Math.round(set.prevWeight * 0.6) : set.prevWeight) : '—'}
                           placeholderTextColor="#71717A"
                           textAlignVertical="center"
                           style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
@@ -417,14 +567,15 @@ export default function ActiveWorkout() {
                 </GlassCard>
               </View>
             );
-          })}
+          })
+        )}
         </View>
       </ScrollView>
 
       {/* Finish Button */}
       <View className="absolute bottom-4 left-4 right-4">
         <Button 
-          onPress={() => router.push('/(tabs)/workout-plan')}
+          onPress={handleFinishWorkout}
           className="w-full bg-primary h-12"
         >
           <Flame size={20} color="#FFFFFF" />
@@ -433,7 +584,7 @@ export default function ActiveWorkout() {
       </View>
 
       {/* Rest Timer Modal */}
-      {showRestTimer && (
+      {activeWorkout.restTimer.isRunning && (
         <View className="absolute inset-0 z-50 bg-background/95 items-center justify-center">
           <View className="items-center">
             <Text className="text-sm text-muted-foreground mb-4 uppercase tracking-wide">Rest Timer</Text>
@@ -461,8 +612,12 @@ export default function ActiveWorkout() {
                 />
               </Svg>
               <View className="absolute inset-0 items-center justify-center">
-                <Text className="text-5xl font-bold font-mono text-foreground">{formatTime(restTime)}</Text>
-                <Text className="text-sm text-muted-foreground mt-1">/ {formatTime(targetRestTime)}</Text>
+                <Text className="text-5xl font-bold font-mono text-foreground">
+                  {formatTime(activeWorkout.restTimer.elapsedSeconds)}
+                </Text>
+                <Text className="text-sm text-muted-foreground mt-1">
+                  / {formatTime(activeWorkout.restTimer.targetSeconds)}
+                </Text>
               </View>
             </View>
 
@@ -470,7 +625,7 @@ export default function ActiveWorkout() {
               <Button
                 variant="outline"
                 size="lg"
-                onPress={() => setShowRestTimer(false)}
+                onPress={stopRestTimer}
                 className="min-w-[128px]"
               >
                 <SkipForward size={16} color="#A1A1AA" />
@@ -478,7 +633,7 @@ export default function ActiveWorkout() {
               </Button>
               <Button
                 size="lg"
-                onPress={() => setShowRestTimer(false)}
+                onPress={stopRestTimer}
                 className="min-w-[128px] bg-primary"
               >
                 <Text className="text-primary-foreground font-semibold">I'm Ready</Text>
@@ -498,11 +653,11 @@ export default function ActiveWorkout() {
           <View className="gap-4 py-4">
             <View className="flex-row items-center justify-between">
               <Text className="text-foreground">Warm-up Sets</Text>
-              <Switch value={warmupMode} onValueChange={setWarmupMode} />
+              <Switch value={activeWorkout.warmupMode} onValueChange={toggleWarmupMode} />
             </View>
             <View className="flex-row items-center justify-between">
               <Text className="text-foreground">Deload Mode (-40%)</Text>
-              <Switch value={deloadMode} onValueChange={setDeloadMode} />
+              <Switch value={activeWorkout.deloadMode} onValueChange={toggleDeloadMode} />
             </View>
             <View className="flex-row items-center justify-between pt-4 border-t border-border">
               <Text className="text-foreground">Unit System</Text>
@@ -602,8 +757,56 @@ export default function ActiveWorkout() {
         onViewHistory={handleViewHistory}
         elapsedTime={elapsedTime}
         unit={unit}
-        deloadMode={deloadMode}
+        deloadMode={activeWorkout.deloadMode}
       />
+
+      {/* Workout Completion Modal */}
+      <Dialog open={showCompletionModal} onOpenChange={setShowCompletionModal}>
+        <DialogContent>
+          <DialogHeader onClose={() => {
+            setShowCompletionModal(false);
+            router.replace('/(tabs)');
+          }}>
+            <View className="items-center mb-2">
+              <View className="w-16 h-16 rounded-full bg-success/20 items-center justify-center mb-3">
+                <Trophy size={32} color="#22C55E" />
+              </View>
+              <DialogTitle className="text-center">Workout Complete!</DialogTitle>
+            </View>
+          </DialogHeader>
+          
+          <View className="gap-4 py-4 items-center">
+            <View className="flex-row gap-6">
+              <View className="items-center">
+                <Text className="text-3xl font-bold text-primary">{formatTime(elapsedTime)}</Text>
+                <Text className="text-xs text-muted-foreground">Duration</Text>
+              </View>
+              <View className="items-center">
+                <Text className="text-3xl font-bold text-success">{workoutStats.completedSets}</Text>
+                <Text className="text-xs text-muted-foreground">Sets</Text>
+              </View>
+              <View className="items-center">
+                <Text className="text-3xl font-bold text-warning">
+                  {workoutStats.totalVolume > 1000 
+                    ? `${(workoutStats.totalVolume / 1000).toFixed(1)}k` 
+                    : workoutStats.totalVolume}
+                </Text>
+                <Text className="text-xs text-muted-foreground">Volume</Text>
+              </View>
+            </View>
+
+            <Button 
+              className="w-full mt-4 bg-primary"
+              onPress={() => {
+                setShowCompletionModal(false);
+                router.replace('/(tabs)');
+              }}
+            >
+              <Text className="text-primary-foreground font-semibold">Back to Dashboard</Text>
+            </Button>
+          </View>
+        </DialogContent>
+      </Dialog>
     </SafeAreaView>
   );
 }
