@@ -238,18 +238,6 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (isAuthLoading || isProfileLoading) return;
     if (session && !profileChecked) return; // Wait for profile check
-    
-    // Wait for navigation to be ready (segments will be empty before mount)
-    // When segments[0] is undefined, the Root Layout hasn't mounted yet
-    if (segments[0] === undefined) {
-      // Navigation not ready yet, wait for next render
-      return;
-    }
-
-    const inAuthGroup = segments[0] === 'login';
-    const inAuthCallback = segments[0] === 'auth'; // Handle auth/callback route
-    const inOnboarding = segments[0] === 'onboarding';
-    const inTabs = segments[0] === '(tabs)';
 
     if (__DEV__) {
       console.log('🧭 Navigation check:', {
@@ -258,42 +246,63 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         onboardingCompleted: onboarding.completed,
         profileChecked,
         currentSegment: segments[0],
+        segmentsLength: segments.length,
       });
     }
+
+    // Get current route info
+    const currentSegment = segments[0];
+    const inAuthGroup = currentSegment === 'login';
+    const inAuthCallback = currentSegment === 'auth'; // Handle auth/callback route
+    const inOnboarding = currentSegment === 'onboarding';
+    const inTabs = currentSegment === '(tabs)';
+    const onIndex = currentSegment === undefined || currentSegment === 'index';
 
     // Don't redirect if we're in the auth callback - let it complete
     if (inAuthCallback) {
       return;
     }
 
-    if (!session) {
-      // No session - redirect to login (unless already there)
-      if (!inAuthGroup) {
-        router.replace('/login');
-      }
-    } else {
-      // Has session
-      if (inAuthGroup) {
-        // On login page but authenticated - check onboarding
-        if (!onboarding.completed || !user) {
-          router.replace('/onboarding');
-        } else {
-          router.replace('/(tabs)');
+    // Helper function to navigate after ensuring Stack is mounted
+    const performNavigation = () => {
+      if (!session) {
+        // No session - redirect to login (unless already there)
+        if (!inAuthGroup) {
+          router.replace('/login');
         }
-      } else if (!inOnboarding && !inTabs && segments[0] !== 'active-workout' && segments[0] !== 'symmetry-history') {
-        // On index or other route - redirect based on onboarding
-        if (!onboarding.completed || !user) {
-          router.replace('/onboarding');
-        } else {
-          router.replace('/(tabs)');
+      } else {
+        // Has session
+        if (inAuthGroup) {
+          // On login page but authenticated - check onboarding
+          if (!onboarding.completed || !user) {
+            router.replace('/onboarding');
+          } else {
+            router.replace('/(tabs)');
+          }
+        } else if (onIndex || (!inOnboarding && !inTabs && currentSegment !== 'active-workout' && currentSegment !== 'symmetry-history')) {
+          // On index or other route - redirect based on onboarding
+          if (!onboarding.completed || !user) {
+            router.replace('/onboarding');
+          } else {
+            router.replace('/(tabs)');
+          }
         }
       }
-    }
 
-    // Mark as ready and hide splash screen
-    if (!isReady) {
-      setIsReady(true);
-      SplashScreen.hideAsync();
+      // Mark as ready and hide splash screen
+      if (!isReady) {
+        setIsReady(true);
+        SplashScreen.hideAsync();
+      }
+    };
+
+    // If on index route (undefined segment), defer navigation to next tick to ensure Stack is mounted
+    if (currentSegment === undefined) {
+      const timer = setTimeout(performNavigation, 100);
+      return () => clearTimeout(timer);
+    } else {
+      // Already on a specific route, navigate immediately
+      performNavigation();
     }
   }, [session, isAuthLoading, isProfileLoading, profileChecked, segments, user, onboarding.completed, isReady]);
 
