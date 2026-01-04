@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, ScrollView, Dimensions, Animated } from 'react-native';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { View, Text, ScrollView, Dimensions, Animated, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -8,6 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { GestureDetector, GestureHandlerRootView, Pressable } from 'react-native-gesture-handler';
 import { ExerciseHistorySheet } from '@/components/ui/workout/ExerciseHistorySheet';
+import { useAppStore } from '@/store/useAppStore';
+import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
 import { 
   TrendingUp, 
   Scale, 
@@ -24,116 +26,100 @@ import {
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
+import type { BodyMeasurement, PhysiqueScan, CardioLog } from '@/types';
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64; // Account for padding
 
-// Mock data
-const weightData = [
-  { date: 'Nov 1', weight: 185, x: 1 },
-  { date: 'Nov 8', weight: 186.2, x: 2 },
-  { date: 'Nov 15', weight: 185.5, x: 3 },
-  { date: 'Nov 22', weight: 186.8, x: 4 },
-  { date: 'Nov 29', weight: 187.2, x: 5 },
-  { date: 'Dec 6', weight: 186.5, x: 6 },
-  { date: 'Dec 13', weight: 187.8, x: 7 },
-  { date: 'Dec 20', weight: 188.1, x: 8 },
-  { date: 'Dec 27', weight: 188.5, x: 9 },
-];
+// Helper functions to transform store data for display
+function formatDate(date: Date | string): string {
+  const d = new Date(date);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
 
-const symmetryData = [
-  { date: 'Oct', score: 72, x: 1 },
-  { date: 'Nov', score: 76, x: 2 },
-  { date: 'Dec', score: 82, x: 3 },
-];
+function formatMonthYear(date: Date | string): string {
+  const d = new Date(date);
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
 
-const measurements = [
-  { name: 'Chest', current: 42.5, previous: 42.0, unit: 'in' },
-  { name: 'Waist', current: 32.0, previous: 32.5, unit: 'in', inverse: true },
-  { name: 'Left Arm', current: 15.2, previous: 15.0, unit: 'in' },
-  { name: 'Right Arm', current: 15.5, previous: 15.3, unit: 'in' },
-  { name: 'Left Thigh', current: 24.5, previous: 24.0, unit: 'in' },
-  { name: 'Right Thigh', current: 24.8, previous: 24.2, unit: 'in' },
-];
+// Transform body measurements to weight chart data
+function transformToWeightData(measurements: BodyMeasurement[]) {
+  if (!measurements.length) return [];
+  
+  return measurements
+    .slice()
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .slice(-9) // Last 9 entries for chart
+    .map((m, i) => ({
+      value: m.weight,
+      label: formatDate(m.date).split(' ')[1], // Just the day
+      date: formatDate(m.date),
+    }));
+}
 
-// Exercise history data
-const exerciseStats = [
-  { 
-    name: 'Bench Press', 
-    muscle: 'Chest',
-    pr: 225,
-    lastWeight: 205,
-    sessions: 24,
-    trend: 'up',
-    history: [
-      { date: 'Dec 20', weight: 205 },
-      { date: 'Dec 13', weight: 200 },
-      { date: 'Dec 6', weight: 195 },
-      { date: 'Nov 29', weight: 190 },
-      { date: 'Nov 22', weight: 185 },
-    ]
-  },
-  { 
-    name: 'Squat', 
-    muscle: 'Legs',
-    pr: 315,
-    lastWeight: 285,
-    sessions: 20,
-    trend: 'up',
-    history: [
-      { date: 'Dec 20', weight: 285 },
-      { date: 'Dec 13', weight: 275 },
-      { date: 'Dec 6', weight: 270 },
-      { date: 'Nov 29', weight: 265 },
-      { date: 'Nov 22', weight: 260 },
-    ]
-  },
-  { 
-    name: 'Deadlift', 
-    muscle: 'Back',
-    pr: 365,
-    lastWeight: 335,
-    sessions: 18,
-    trend: 'stable',
-    history: [
-      { date: 'Dec 20', weight: 335 },
-      { date: 'Dec 13', weight: 335 },
-      { date: 'Dec 6', weight: 330 },
-      { date: 'Nov 29', weight: 325 },
-      { date: 'Nov 22', weight: 320 },
-    ]
-  },
-  { 
-    name: 'Shoulder Press', 
-    muscle: 'Shoulders',
-    pr: 155,
-    lastWeight: 135,
-    sessions: 22,
-    trend: 'up',
-    history: [
-      { date: 'Dec 20', weight: 135 },
-      { date: 'Dec 13', weight: 130 },
-      { date: 'Dec 6', weight: 125 },
-      { date: 'Nov 29', weight: 125 },
-      { date: 'Nov 22', weight: 120 },
-    ]
-  },
-  { 
-    name: 'Barbell Row', 
-    muscle: 'Back',
-    pr: 205,
-    lastWeight: 185,
-    sessions: 16,
-    trend: 'up',
-    history: [
-      { date: 'Dec 20', weight: 185 },
-      { date: 'Dec 13', weight: 180 },
-      { date: 'Dec 6', weight: 175 },
-      { date: 'Nov 29', weight: 170 },
-      { date: 'Nov 22', weight: 165 },
-    ]
-  },
-];
+// Transform physique scans to symmetry chart data
+function transformToSymmetryData(scans: PhysiqueScan[]) {
+  if (!scans.length) return [];
+  
+  return scans
+    .slice()
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+    .slice(-6) // Last 6 entries
+    .map((s) => ({
+      value: s.symmetryScore,
+      label: formatMonthYear(s.date).split(' ')[0], // Just the month
+    }));
+}
+
+// Get body measurements comparison (current vs previous)
+function getMeasurementsComparison(measurements: BodyMeasurement[]) {
+  if (measurements.length < 1) return [];
+  
+  const sorted = measurements
+    .slice()
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  
+  const current = sorted[0];
+  const previous = sorted[1] || current;
+  
+  const measurementTypes: Array<{
+    key: keyof BodyMeasurement['measurements'];
+    name: string;
+    unit: string;
+    inverse?: boolean;
+  }> = [
+    { key: 'chest', name: 'Chest', unit: 'in' },
+    { key: 'waist', name: 'Waist', unit: 'in', inverse: true },
+    { key: 'arms', name: 'Arms', unit: 'in' },
+    { key: 'thighs', name: 'Thighs', unit: 'in' },
+  ];
+  
+  return measurementTypes
+    .filter(m => current.measurements[m.key] !== undefined)
+    .map(m => ({
+      name: m.name,
+      current: current.measurements[m.key] ?? 0,
+      previous: previous.measurements[m.key] ?? current.measurements[m.key] ?? 0,
+      unit: m.unit,
+      inverse: m.inverse,
+    }));
+}
+
+// Transform cardio logs for display
+function transformCardioLogs(logs: CardioLog[]) {
+  return logs
+    .slice()
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 10) // Last 10 entries
+    .map(log => ({
+      id: log.id,
+      type: log.type.charAt(0).toUpperCase() + log.type.slice(1),
+      duration: log.duration,
+      intensity: log.duration > 40 ? 'High' : log.duration > 20 ? 'Moderate' : 'Low',
+      date: formatDate(log.date),
+      calories: log.calories ?? Math.round(log.duration * 8),
+    }));
+}
 
 export default function Progress() {
   const router = useRouter();
@@ -142,35 +128,104 @@ export default function Progress() {
   const [exerciseFilter, setExerciseFilter] = useState('recent');
   const [selectedExerciseId, setSelectedExerciseId] = useState<string | null>(null);
   const [showExerciseHistory, setShowExerciseHistory] = useState(false);
+  const [weightInput, setWeightInput] = useState('');
   
   const headerAnim = useRef(new Animated.Value(0)).current;
   const contentAnim = useRef(new Animated.Value(0)).current;
 
+  // Get user and data from store
+  const user = useAppStore((s) => s.user);
+  const bodyMeasurements = useAppStore((s) => s.bodyMeasurements);
+  const physiqueScans = useAppStore((s) => s.physiqueScans);
+  const cardioLogs = useAppStore((s) => s.cardioLogs);
+  const settings = useAppStore((s) => s.settings);
+  const syncAddBodyMeasurement = useAppStore((s) => s.syncAddBodyMeasurement);
+  const syncAddCardioLog = useAppStore((s) => s.syncAddCardioLog);
+  const isLoading = useAppStore((s) => s.isLoading);
+
+  // Load progress data on tab focus
+  const { isLoading: isProgressLoading, loadProgressData } = useProgressDataInitialization(user?.id ?? null);
+
+  // Load progress data when this screen comes into focus
   useFocusEffect(
     useCallback(() => {
+      loadProgressData();
+      
       headerAnim.setValue(0);
       contentAnim.setValue(0);
       Animated.stagger(100, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(contentAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
       ]).start();
-    }, [headerAnim, contentAnim])
+    }, [headerAnim, contentAnim, loadProgressData])
   );
 
-  const createAnimStyle = (anim: Animated.Value) => ({
-    opacity: anim,
-    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
-  });
+  // Compute derived data using useMemo
+  const weightChartData = useMemo(() => transformToWeightData(bodyMeasurements), [bodyMeasurements]);
+  const symmetryChartData = useMemo(() => transformToSymmetryData(physiqueScans), [physiqueScans]);
+  const measurementsComparison = useMemo(() => getMeasurementsComparison(bodyMeasurements), [bodyMeasurements]);
+  const cardioLogsList = useMemo(() => transformCardioLogs(cardioLogs), [cardioLogs]);
 
-  const getDelta = (current: number, previous: number, inverse?: boolean) => {
-    const delta = current - previous;
-    const isPositive = inverse ? delta < 0 : delta > 0;
-    return { value: Math.abs(delta).toFixed(1), isPositive };
+  // Calculate weight change
+  const weightChange = useMemo(() => {
+    if (bodyMeasurements.length < 2) return 0;
+    const sorted = bodyMeasurements
+      .slice()
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return sorted[0].weight - sorted[sorted.length - 1].weight;
+  }, [bodyMeasurements]);
+
+  // Get last weight entry
+  const lastWeight = useMemo(() => {
+    if (!bodyMeasurements.length) return null;
+    const sorted = bodyMeasurements
+      .slice()
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return { weight: sorted[0].weight, date: formatDate(sorted[0].date) };
+  }, [bodyMeasurements]);
+
+  // Handle logging weight
+  const handleLogWeight = async () => {
+    if (!weightInput || !user) return;
+    
+    const weight = parseFloat(weightInput);
+    if (isNaN(weight)) return;
+
+    const newMeasurement: BodyMeasurement = {
+      id: `bm-${Date.now()}`,
+      userId: user.id,
+      date: new Date(),
+      weight,
+      measurements: {},
+    };
+
+    try {
+      await syncAddBodyMeasurement(newMeasurement);
+      setWeightInput('');
+    } catch (error) {
+      console.error('Failed to log weight:', error);
+    }
   };
+
+  // Exercise stats type for the Exercises tab
+  interface ExerciseStat {
+    name: string;
+    muscle: string;
+    pr: number;
+    lastWeight: number;
+    sessions: number;
+    trend: 'up' | 'down' | 'stable';
+  }
+
+  // Placeholder exercise stats - will be populated from workout history
+  const exerciseStats = useMemo((): ExerciseStat[] => {
+    // TODO: Derive from workout history when available
+    return [];
+  }, []);
 
   // Filter and sort exercises
   const filteredExercises = exerciseStats
-    .filter(ex => ex.name.toLowerCase().includes(exerciseSearch.toLowerCase()) ||
+    .filter((ex) => ex.name.toLowerCase().includes(exerciseSearch.toLowerCase()) ||
                   ex.muscle.toLowerCase().includes(exerciseSearch.toLowerCase()))
     .sort((a, b) => {
       switch (exerciseFilter) {
@@ -184,6 +239,29 @@ export default function Progress() {
           return b.sessions - a.sessions;
       }
     });
+
+  const createAnimStyle = (anim: Animated.Value) => ({
+    opacity: anim,
+    transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
+  });
+
+  const getDelta = (current: number, previous: number, inverse?: boolean) => {
+    const delta = current - previous;
+    const isPositive = inverse ? delta < 0 : delta > 0;
+    return { value: Math.abs(delta).toFixed(1), isPositive };
+  };
+
+  // Show loading state
+  if (isProgressLoading && !bodyMeasurements.length) {
+    return (
+      <SafeAreaView edges={['top']} className="flex-1 bg-background">
+        <View className="flex-1 items-center justify-center">
+          <ActivityIndicator size="large" color="#31D5E3" />
+          <Text className="text-muted-foreground mt-4">Loading progress data...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
@@ -214,56 +292,68 @@ export default function Progress() {
                     <Scale size={20} color="#31D5E3" />
                     <Text className="text-lg font-semibold text-foreground">Body Weight</Text>
                   </View>
-                  <Text className="text-sm text-success">+3.5 lbs</Text>
+                  {weightChange !== 0 && (
+                    <Text className={cn('text-sm', weightChange > 0 ? 'text-success' : 'text-destructive')}>
+                      {weightChange > 0 ? '+' : ''}{weightChange.toFixed(1)} {settings.unit}
+                    </Text>
+                  )}
                 </View>
                 <GlassCard className="p-0 overflow-hidden pb-4">
-                  <View className="items-center justify-center pt-4">
-                    <LineChart
-                      data={weightData.map(d => ({ value: d.weight, label: d.date.split(' ')[1] }))}
-                      curved
-                      areaChart
-                      height={180}
-                      width={chartWidth}
-                      spacing={30}
-                      initialSpacing={10}
-                      color="#31D5E3"
-                      thickness={3}
-                      startFillColor="#31D5E3"
-                      endFillColor="#31D5E3"
-                      startOpacity={0.3}
-                      endOpacity={0.05}
-                      dataPointsColor="#31D5E3"
-                      dataPointsRadius={4}
-                      hideDataPoints={false}
-                      yAxisColor="#27272A"
-                      xAxisColor="#27272A"
-                      yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
-                      xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 9 }}
-                      rulesType="solid"
-                      rulesColor="#27272A"
-                      noOfSections={4}
-                      backgroundColor="transparent"
-                      pointerConfig={{
-                        pointerStripHeight: 160,
-                        pointerStripColor: '#31D5E3',
-                        pointerStripWidth: 2,
-                        pointerColor: '#31D5E3',
-                        radius: 6,
-                        pointerLabelWidth: 100,
+                  {weightChartData.length > 0 ? (
+                    <View className="items-center justify-center pt-4">
+                      <LineChart
+                        data={weightChartData}
+                        curved
+                        areaChart
+                        height={180}
+                        width={chartWidth}
+                        spacing={30}
+                        initialSpacing={10}
+                        color="#31D5E3"
+                        thickness={3}
+                        startFillColor="#31D5E3"
+                        endFillColor="#31D5E3"
+                        startOpacity={0.3}
+                        endOpacity={0.05}
+                        dataPointsColor="#31D5E3"
+                        dataPointsRadius={4}
+                        hideDataPoints={false}
+                        yAxisColor="#27272A"
+                        xAxisColor="#27272A"
+                        yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                        xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 9 }}
+                        rulesType="solid"
+                        rulesColor="#27272A"
+                        noOfSections={4}
+                        backgroundColor="transparent"
+                        pointerConfig={{
+                          pointerStripHeight: 160,
+                          pointerStripColor: '#31D5E3',
+                          pointerStripWidth: 2,
+                          pointerColor: '#31D5E3',
+                          radius: 6,
+                          pointerLabelWidth: 100,
                         pointerLabelHeight: 90,
                         activatePointersOnLongPress: true,
                         autoAdjustPointerLabelPosition: false,
                         pointerLabelComponent: (items: any) => {
                           return (
                             <View className="bg-card border border-border rounded-lg px-3 py-2">
-                              <Text className="text-xs text-primary font-bold">{items[0].value} lbs</Text>
-                              <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
+                              <Text className="text-xs text-primary font-bold">{items[0].value} {settings.unit}</Text>
+                              <Text className="text-xs text-muted-foreground">{items[0].date || items[0].label}</Text>
                             </View>
                           );
                         },
                       }}
                     />
-                  </View>
+                    </View>
+                  ) : (
+                    <View className="items-center justify-center py-12">
+                      <Scale size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                      <Text className="text-muted-foreground mt-3">No weight data yet</Text>
+                      <Text className="text-xs text-muted-foreground mt-1">Log your weight to see trends</Text>
+                    </View>
+                  )}
                 </GlassCard>
               </View>
 
@@ -285,26 +375,27 @@ export default function Progress() {
                   </Button>
                 </View>
                 <GlassCard className="p-0 overflow-hidden pb-4">
-                  <View className="items-center justify-center pt-4">
-                    <LineChart
-                      data={symmetryData.map(d => ({ value: d.score, label: d.date }))}
-                      curved
-                      areaChart
-                      height={180}
-                      width={chartWidth}
-                      spacing={80}
-                      initialSpacing={20}
-                      color="#4ADE80"
-                      thickness={3}
-                      startFillColor="#4ADE80"
-                      endFillColor="#4ADE80"
-                      startOpacity={0.3}
-                      endOpacity={0.05}
-                      dataPointsColor="#4ADE80"
-                      dataPointsRadius={5}
-                      hideDataPoints={false}
-                      yAxisColor="#27272A"
-                      xAxisColor="#27272A"
+                  {symmetryChartData.length > 0 ? (
+                    <View className="items-center justify-center pt-4">
+                      <LineChart
+                        data={symmetryChartData}
+                        curved
+                        areaChart
+                        height={180}
+                        width={chartWidth}
+                        spacing={80}
+                        initialSpacing={20}
+                        color="#4ADE80"
+                        thickness={3}
+                        startFillColor="#4ADE80"
+                        endFillColor="#4ADE80"
+                        startOpacity={0.3}
+                        endOpacity={0.05}
+                        dataPointsColor="#4ADE80"
+                        dataPointsRadius={5}
+                        hideDataPoints={false}
+                        yAxisColor="#27272A"
+                        xAxisColor="#27272A"
                       yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
                       xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
                       rulesType="solid"
@@ -331,7 +422,14 @@ export default function Progress() {
                         },
                       }}
                     />
-                  </View>
+                    </View>
+                  ) : (
+                    <View className="items-center justify-center py-12">
+                      <TrendingUp size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                      <Text className="text-muted-foreground mt-3">No symmetry scans yet</Text>
+                      <Text className="text-xs text-muted-foreground mt-1">Complete a physique scan to track symmetry</Text>
+                    </View>
+                  )}
                 </GlassCard>
               </View>
 
@@ -341,25 +439,25 @@ export default function Progress() {
                 <View className="flex-row flex-wrap gap-3">
                   <View className="w-[48%]">
                     <GlassCard className="items-center">
-                      <Text className="text-3xl font-bold text-primary">16</Text>
+                      <Text className="text-3xl font-bold text-primary">--</Text>
                       <Text className="text-xs text-muted-foreground mt-1">Workouts</Text>
                     </GlassCard>
                   </View>
                   <View className="w-[48%]">
                     <GlassCard className="items-center">
-                      <Text className="text-3xl font-bold text-success">48.2k</Text>
+                      <Text className="text-3xl font-bold text-success">--</Text>
                       <Text className="text-xs text-muted-foreground mt-1">Total Volume</Text>
                     </GlassCard>
                   </View>
                   <View className="w-[48%]">
                     <GlassCard className="items-center">
-                      <Text className="text-3xl font-bold text-warning">12h</Text>
+                      <Text className="text-3xl font-bold text-warning">--</Text>
                       <Text className="text-xs text-muted-foreground mt-1">Time Trained</Text>
                     </GlassCard>
                   </View>
                   <View className="w-[48%]">
                     <GlassCard className="items-center">
-                      <Text className="text-3xl font-bold text-foreground">4</Text>
+                      <Text className="text-3xl font-bold text-foreground">--</Text>
                       <Text className="text-xs text-muted-foreground mt-1">PRs Hit</Text>
                     </GlassCard>
                   </View>
@@ -463,33 +561,34 @@ export default function Progress() {
                   </Button>
                 </View>
 
-                <View className="gap-3">
-                  {measurements.map((m) => {
-                    const delta = getDelta(m.current, m.previous, m.inverse);
-                    return (
-                      <GlassCard key={m.name} className="flex-row items-center justify-between">
-                        <View>
-                          <Text className="font-medium text-foreground">{m.name}</Text>
-                          <Text className="text-xs text-muted-foreground">Last: {m.previous} {m.unit}</Text>
-                        </View>
-                        <View className="flex-row items-center gap-3">
-                          <View className={cn(
-                            'flex-row items-center gap-0.5',
-                            delta.isPositive ? 'text-success' : delta.value !== '0.0' ? 'text-destructive' : 'text-muted-foreground'
-                          )}>
-                            {delta.value === '0.0' ? (
-                              <Minus size={12} color="#71717A" />
-                            ) : delta.isPositive ? (
-                              <ChevronUp size={12} color="#4ADE80" />
-                            ) : (
-                              <ChevronDown size={12} color="#EF4444" />
-                            )}
-                            <Text className={cn(
-                              'text-xs font-medium',
+                {measurementsComparison.length > 0 ? (
+                  <View className="gap-3">
+                    {measurementsComparison.map((m) => {
+                      const delta = getDelta(m.current, m.previous, m.inverse);
+                      return (
+                        <GlassCard key={m.name} className="flex-row items-center justify-between">
+                          <View>
+                            <Text className="font-medium text-foreground">{m.name}</Text>
+                            <Text className="text-xs text-muted-foreground">Last: {m.previous} {m.unit}</Text>
+                          </View>
+                          <View className="flex-row items-center gap-3">
+                            <View className={cn(
+                              'flex-row items-center gap-0.5',
                               delta.isPositive ? 'text-success' : delta.value !== '0.0' ? 'text-destructive' : 'text-muted-foreground'
                             )}>
-                              {delta.value}"
-                            </Text>
+                              {delta.value === '0.0' ? (
+                                <Minus size={12} color="#71717A" />
+                              ) : delta.isPositive ? (
+                                <ChevronUp size={12} color="#4ADE80" />
+                              ) : (
+                                <ChevronDown size={12} color="#EF4444" />
+                              )}
+                              <Text className={cn(
+                                'text-xs font-medium',
+                                delta.isPositive ? 'text-success' : delta.value !== '0.0' ? 'text-destructive' : 'text-muted-foreground'
+                              )}>
+                                {delta.value}"
+                              </Text>
                           </View>
                           <Text className="text-xl font-bold text-foreground">{m.current}</Text>
                           <Text className="text-sm text-muted-foreground">{m.unit}</Text>
@@ -497,7 +596,14 @@ export default function Progress() {
                       </GlassCard>
                     );
                   })}
-                </View>
+                  </View>
+                ) : (
+                  <GlassCard className="items-center py-8">
+                    <Ruler size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                    <Text className="text-muted-foreground mt-3">No measurements logged</Text>
+                    <Text className="text-xs text-muted-foreground mt-1">Tap "Log" to add your first measurement</Text>
+                  </GlassCard>
+                )}
               </View>
 
               {/* Weight Log */}
@@ -511,16 +617,25 @@ export default function Progress() {
                 <GlassCard>
                   <View className="flex-row gap-3">
                     <Input 
-                      placeholder="188.5" 
+                      placeholder={lastWeight?.weight.toString() || "180.0"} 
+                      value={weightInput}
+                      onChangeText={setWeightInput}
                       className="flex-1 text-center text-lg font-bold"
                       keyboardType="decimal-pad"
                     />
-                    <Button className="bg-primary px-6">
+                    <Button 
+                      className="bg-primary px-6"
+                      onPress={handleLogWeight}
+                      disabled={isLoading || !weightInput}
+                    >
                       <Text className="text-primary-foreground font-semibold">Log</Text>
                     </Button>
                   </View>
                   <Text className="text-xs text-muted-foreground mt-2 text-center">
-                    Last entry: 188.5 lbs on Dec 27
+                    {lastWeight 
+                      ? `Last entry: ${lastWeight.weight} ${settings.unit} on ${lastWeight.date}`
+                      : 'No entries yet'
+                    }
                   </Text>
                 </GlassCard>
               </View>
@@ -540,58 +655,68 @@ export default function Progress() {
                   </Button>
                 </View>
 
-                <View className="gap-3">
-                  {[
-                    { type: 'Running', duration: 30, intensity: 'Moderate', date: 'Today', calories: 320 },
-                    { type: 'Walking', duration: 45, intensity: 'Low', date: 'Dec 27', calories: 180 },
-                    { type: 'Cycling', duration: 25, intensity: 'High', date: 'Dec 25', calories: 280 },
-                  ].map((session, i) => (
-                    <GlassCard key={i} className="flex-row items-center justify-between">
-                      <View className="flex-row items-center gap-3">
-                        <View className={cn(
-                          'w-10 h-10 rounded-lg flex items-center justify-center',
-                          session.intensity === 'High' ? 'bg-destructive/20' :
-                          session.intensity === 'Moderate' ? 'bg-warning/20' : 'bg-success/20'
-                        )}>
-                          <Activity 
-                            size={20} 
-                            color={
-                              session.intensity === 'High' ? '#EF4444' :
-                              session.intensity === 'Moderate' ? '#F59E0B' : '#4ADE80'
-                            } 
-                          />
+                {cardioLogsList.length > 0 ? (
+                  <View className="gap-3">
+                    {cardioLogsList.map((session) => (
+                      <GlassCard key={session.id} className="flex-row items-center justify-between">
+                        <View className="flex-row items-center gap-3">
+                          <View className={cn(
+                            'w-10 h-10 rounded-lg flex items-center justify-center',
+                            session.intensity === 'High' ? 'bg-destructive/20' :
+                            session.intensity === 'Moderate' ? 'bg-warning/20' : 'bg-success/20'
+                          )}>
+                            <Activity 
+                              size={20} 
+                              color={
+                                session.intensity === 'High' ? '#EF4444' :
+                                session.intensity === 'Moderate' ? '#F59E0B' : '#4ADE80'
+                              } 
+                            />
+                          </View>
+                          <View>
+                            <Text className="font-medium text-foreground">{session.type}</Text>
+                            <Text className="text-xs text-muted-foreground">{session.date}</Text>
+                          </View>
                         </View>
-                        <View>
-                          <Text className="font-medium text-foreground">{session.type}</Text>
-                          <Text className="text-xs text-muted-foreground">{session.date}</Text>
+                        <View className="items-end">
+                          <Text className="font-bold text-foreground">{session.duration} min</Text>
+                          <Text className="text-xs text-muted-foreground">{session.calories} cal</Text>
                         </View>
-                      </View>
-                      <View className="items-end">
-                        <Text className="font-bold text-foreground">{session.duration} min</Text>
-                        <Text className="text-xs text-muted-foreground">{session.calories} cal</Text>
-                      </View>
-                    </GlassCard>
-                  ))}
-                </View>
+                      </GlassCard>
+                    ))}
+                  </View>
+                ) : (
+                  <GlassCard className="items-center py-8">
+                    <Activity size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                    <Text className="text-muted-foreground mt-3">No cardio sessions logged</Text>
+                    <Text className="text-xs text-muted-foreground mt-1">Tap "Add" to log your cardio</Text>
+                  </GlassCard>
+                )}
 
                 {/* Weekly Summary */}
-                <GlassCard className="mt-6">
-                  <Text className="font-semibold mb-3 text-foreground">This Week</Text>
-                  <View className="flex-row justify-between">
-                    <View className="items-center flex-1">
-                      <Text className="text-2xl font-bold text-primary">3</Text>
-                      <Text className="text-xs text-muted-foreground">Sessions</Text>
+                {cardioLogsList.length > 0 && (
+                  <GlassCard className="mt-6">
+                    <Text className="font-semibold mb-3 text-foreground">Recent Activity</Text>
+                    <View className="flex-row justify-between">
+                      <View className="items-center flex-1">
+                        <Text className="text-2xl font-bold text-primary">{cardioLogsList.length}</Text>
+                        <Text className="text-xs text-muted-foreground">Sessions</Text>
+                      </View>
+                      <View className="items-center flex-1">
+                        <Text className="text-2xl font-bold text-foreground">
+                          {cardioLogsList.reduce((sum, s) => sum + s.duration, 0)}
+                        </Text>
+                        <Text className="text-xs text-muted-foreground">Minutes</Text>
+                      </View>
+                      <View className="items-center flex-1">
+                        <Text className="text-2xl font-bold text-warning">
+                          {cardioLogsList.reduce((sum, s) => sum + s.calories, 0)}
+                        </Text>
+                        <Text className="text-xs text-muted-foreground">Calories</Text>
+                      </View>
                     </View>
-                    <View className="items-center flex-1">
-                      <Text className="text-2xl font-bold text-foreground">100</Text>
-                      <Text className="text-xs text-muted-foreground">Minutes</Text>
-                    </View>
-                    <View className="items-center flex-1">
-                      <Text className="text-2xl font-bold text-warning">780</Text>
-                      <Text className="text-xs text-muted-foreground">Calories</Text>
-                    </View>
-                  </View>
-                </GlassCard>
+                  </GlassCard>
+                )}
               </View>
             </TabsContent>
           </Tabs>

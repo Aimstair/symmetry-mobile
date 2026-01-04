@@ -1,6 +1,6 @@
 import * as React from 'react';
-import { useState } from 'react';
-import { View, Text, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
+import { useState, useEffect } from 'react';
+import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -20,6 +20,8 @@ import {
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
+import { supabase } from '@/lib/supabase';
+import { dataService, isUsingCloudService } from '@/services/dataServiceProvider';
 
 /**
  * Onboarding Page - React Native Implementation
@@ -67,6 +69,32 @@ export default function Onboarding() {
   const { updateOnboarding, completeOnboarding, setUser } = useAppStore();
 
   const [step, setStep] = useState(1);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
+
+  // Get the current Supabase session on mount
+  useEffect(() => {
+    async function getSession() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        setSessionUserId(session.user.id);
+        setSessionEmail(session.user.email || null);
+        
+        if (__DEV__) {
+          console.log('👤 Onboarding for user:', session.user.email, session.user.id);
+        }
+      } else {
+        // No session - redirect back to login
+        if (__DEV__) {
+          console.log('⚠️ No session in onboarding, redirecting to login');
+        }
+        router.replace('/login');
+      }
+    }
+    getSession();
+  }, []);
+
   const [formData, setFormData] = useState({
     height: '',
     weight: '',
@@ -99,26 +127,73 @@ export default function Onboarding() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (step < 5) {
       setStep(step + 1);
     } else {
-      // Complete onboarding
-      setUser({
-        id: '1',
-        name: 'Athlete',
-        email: 'athlete@example.com',
-        height: Number(formData.height),
-        weight: Number(formData.weight),
-        age: Number(formData.age),
-        gender: formData.gender,
-        experienceLevel: formData.experience as 'beginner' | 'intermediate' | 'advanced',
-        goal: (formData.goal === 'maintain' ? 'maintenance' : formData.goal) as 'bulk' | 'cut' | 'recomp' | 'maintenance',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      completeOnboarding();
-      router.push('/(tabs)');
+      // Complete onboarding - save user with Supabase session ID
+      if (!sessionUserId) {
+        Alert.alert('Error', 'No authenticated session found. Please sign in again.');
+        router.replace('/login');
+        return;
+      }
+
+      setIsSubmitting(true);
+
+      try {
+        // Create the user object with the Supabase user ID
+        const newUser = {
+          id: sessionUserId,
+          name: sessionEmail?.split('@')[0] || 'Athlete', // Use email prefix as default name
+          email: sessionEmail || '',
+          height: Number(formData.height),
+          weight: Number(formData.weight),
+          age: Number(formData.age),
+          gender: formData.gender,
+          experienceLevel: formData.experience as 'beginner' | 'intermediate' | 'advanced',
+          goal: (formData.goal === 'maintain' ? 'maintenance' : formData.goal) as 'bulk' | 'cut' | 'recomp' | 'maintenance',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        // Save to cloud if using cloud service
+        if (isUsingCloudService()) {
+          try {
+            await dataService.user.createUser(newUser);
+            if (__DEV__) {
+              console.log('✅ User profile saved to Supabase:', newUser.id);
+            }
+          } catch (error: any) {
+            // If user already exists, try updating instead
+            if (error.message?.includes('duplicate') || error.message?.includes('already exists')) {
+              await dataService.user.updateUser(newUser.id, newUser);
+              if (__DEV__) {
+                console.log('✅ User profile updated in Supabase:', newUser.id);
+              }
+            } else {
+              throw error;
+            }
+          }
+        }
+
+        // Update local store
+        setUser(newUser);
+        completeOnboarding();
+
+        if (__DEV__) {
+          console.log('🎉 Onboarding completed for user:', newUser.id);
+        }
+
+        router.replace('/(tabs)');
+      } catch (error: any) {
+        console.error('❌ Error saving user profile:', error);
+        Alert.alert(
+          'Error',
+          error.message || 'Failed to save your profile. Please try again.'
+        );
+      } finally {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -519,6 +594,7 @@ export default function Onboarding() {
                     variant="outline"
                     onPress={() => setStep(step - 1)}
                     className="w-full"
+                    disabled={isSubmitting}
                     leftIcon={<ChevronLeft size={16} color="#FAFAFA" />}
                   >
                     <Text className="text-foreground font-semibold">Back</Text>
@@ -528,19 +604,27 @@ export default function Onboarding() {
               <View className={cn('flex-1', step === 1 && 'w-full')}>
                 <Button
                   onPress={handleNext}
-                  disabled={!canProceed()}
+                  disabled={!canProceed() || isSubmitting}
                   className={cn(
                     'w-full',
-                    canProceed() ? 'bg-primary opacity-100' : 'bg-muted opacity-50'
+                    canProceed() && !isSubmitting ? 'bg-primary opacity-100' : 'bg-muted opacity-50'
                   )}
-                  leftIcon={step === 5 ? <Sparkles size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
+                  leftIcon={step === 5 ? (
+                    isSubmitting ? (
+                      <ActivityIndicator size="small" color="#0A0A0F" />
+                    ) : (
+                      <Sparkles size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} />
+                    )
+                  ) : undefined}
                   rightIcon={step !== 5 ? <ChevronRight size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
                 >
                   <Text className={cn(
                     'font-semibold',
-                    canProceed() ? 'text-primary-foreground' : 'text-muted-foreground'
+                    canProceed() && !isSubmitting ? 'text-primary-foreground' : 'text-muted-foreground'
                   )}>
-                    {step === 5 ? 'Start Training' : 'Continue'}
+                    {step === 5 
+                      ? (isSubmitting ? 'Setting up...' : 'Start Training') 
+                      : 'Continue'}
                   </Text>
                 </Button>
               </View>

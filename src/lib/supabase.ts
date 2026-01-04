@@ -10,6 +10,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import 'react-native-url-polyfill/auto';
 
 // Get environment variables
@@ -23,11 +24,23 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-// Create Supabase client
+// Custom storage adapter for Supabase Auth using AsyncStorage
+const ExpoSecureStorageAdapter = {
+  getItem: async (key: string): Promise<string | null> => {
+    return AsyncStorage.getItem(key);
+  },
+  setItem: async (key: string, value: string): Promise<void> => {
+    await AsyncStorage.setItem(key, value);
+  },
+  removeItem: async (key: string): Promise<void> => {
+    await AsyncStorage.removeItem(key);
+  },
+};
+
+// Create Supabase client with auth configuration
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
-    // Use AsyncStorage for session persistence
-    storage: undefined, // Will use default AsyncStorage
+    storage: ExpoSecureStorageAdapter,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
