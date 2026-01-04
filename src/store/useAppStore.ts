@@ -105,6 +105,8 @@ interface AppState {
   syncAddBodyMeasurement: (measurement: BodyMeasurement) => Promise<BodyMeasurement>;
   syncAddPhysiqueScan: (scan: PhysiqueScan) => Promise<PhysiqueScan>;
   syncAddCardioLog: (log: CardioLog) => Promise<CardioLog>;
+
+  syncUpdateNutritionTargets: (targets: NutritionTargets) => Promise<void>;
 }
 
 const initialSettings: AppSettings = {
@@ -460,6 +462,30 @@ export const useAppStore = create<AppState>()(
           set({ isLoading: false, loadingMessage: null });
           console.error('❌ Failed to sync cardio log:', error);
           throw error;
+        }
+      },
+
+      syncUpdateNutritionTargets: async (targets) => {
+        set({ isLoading: true, loadingMessage: 'Updating macros...' });
+        try {
+          const userId = get().user?.id;
+          if (!userId) throw new Error('No user found');
+
+          // Update Cloud
+          await dataService.user.updateNutritionTargets(userId, targets);
+
+          // Update Local
+          set({
+            nutritionTargets: targets,
+            isLoading: false,
+            loadingMessage: null,
+          });
+          
+          if (__DEV__) console.log('✅ Nutrition targets recalculated and synced');
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to sync nutrition:', error);
+          throw error; // Rethrow so UI can show error if needed
         }
       },
     }),

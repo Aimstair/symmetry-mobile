@@ -22,7 +22,7 @@ import {
 import { useRouter } from 'expo-router';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
-import { getExerciseInfo } from '@/constants/exercises';
+import { getExerciseInfo } from '@/hooks/useExercises';
 import {
   getCurrentWeekCalendar,
   getWeekStart,

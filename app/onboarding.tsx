@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -19,9 +19,12 @@ import {
   Sparkles,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+import { convert } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
 import { supabase } from '@/lib/supabase';
 import { dataService, isUsingCloudService } from '@/services/dataServiceProvider';
+import { calculateNutritionTargets } from '@/utils/nutrition';
+import { NutritionTargets } from '@/types';
 
 /**
  * Onboarding Page - React Native Implementation
@@ -66,7 +69,7 @@ const equipmentTypes = [
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 export default function Onboarding() {
-  const { updateOnboarding, completeOnboarding, setUser } = useAppStore();
+  const { updateOnboarding, completeOnboarding, setUser, syncUpdateNutritionTargets, settings, updateSettings } = useAppStore();
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -141,13 +144,25 @@ export default function Onboarding() {
       setIsSubmitting(true);
 
       try {
-        // Create the user object with the Supabase user ID
+        // Convert input values to metric if needed (database always stores metric)
+        let heightInCm = Number(formData.height);
+        let weightInKg = Number(formData.weight);
+
+        // If user selected imperial units, convert to metric
+        if (settings.measurementUnit === 'in') {
+          heightInCm = convert.toCm(Number(formData.height));
+        }
+        if (settings.unit === 'lbs') {
+          weightInKg = convert.toKg(Number(formData.weight));
+        }
+
+        // Create the user object with the Supabase user ID (always in metric)
         const newUser = {
           id: sessionUserId,
           name: sessionEmail?.split('@')[0] || 'Athlete', // Use email prefix as default name
           email: sessionEmail || '',
-          height: Number(formData.height),
-          weight: Number(formData.weight),
+          height: heightInCm,
+          weight: weightInKg,
           age: Number(formData.age),
           gender: formData.gender,
           experienceLevel: formData.experience as 'beginner' | 'intermediate' | 'advanced',
@@ -155,6 +170,22 @@ export default function Onboarding() {
           createdAt: new Date(),
           updatedAt: new Date(),
         };
+
+        // Calculate nutrition targets using metric values
+        const nutritionTargets = calculateNutritionTargets(
+          {
+            weight: weightInKg,
+            height: heightInCm,
+            age: Number(formData.age),
+            gender: formData.gender,
+            goal: (formData.goal === 'maintain' ? 'maintenance' : formData.goal) as any,
+          },
+          formData.frequency
+        );
+
+        if (__DEV__) {
+          console.log('🍎 Calculated Nutrition:', nutritionTargets);
+        }
 
         // Save to cloud if using cloud service
         if (isUsingCloudService()) {
@@ -178,6 +209,7 @@ export default function Onboarding() {
 
         // Update local store
         setUser(newUser);
+        await syncUpdateNutritionTargets(nutritionTargets);
         completeOnboarding();
 
         if (__DEV__) {
@@ -254,25 +286,72 @@ export default function Onboarding() {
                   We'll use this to customize your training
                 </Text>
 
+                {/* Unit Selection Toggle */}
+                <View className="mb-6">
+                  <Label className="mb-2">Unit System</Label>
+                  <View className="flex-row gap-2">
+                    <Pressable
+                      className={cn(
+                        'flex-1 p-3 rounded-lg border',
+                        settings.unit === 'lbs' && settings.measurementUnit === 'in'
+                          ? 'bg-primary border-primary'
+                          : 'bg-card border-border'
+                      )}
+                      onPress={() => {
+                        updateSettings({ unit: 'lbs', measurementUnit: 'in' });
+                      }}
+                    >
+                      <Text className={cn(
+                        'text-center font-semibold',
+                        settings.unit === 'lbs' && settings.measurementUnit === 'in'
+                          ? 'text-primary-foreground'
+                          : 'text-foreground'
+                      )}>
+                        Imperial (lbs/in)
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      className={cn(
+                        'flex-1 p-3 rounded-lg border',
+                        settings.unit === 'kg' && settings.measurementUnit === 'cm'
+                          ? 'bg-primary border-primary'
+                          : 'bg-card border-border'
+                      )}
+                      onPress={() => {
+                        updateSettings({ unit: 'kg', measurementUnit: 'cm' });
+                      }}
+                    >
+                      <Text className={cn(
+                        'text-center font-semibold',
+                        settings.unit === 'kg' && settings.measurementUnit === 'cm'
+                          ? 'text-primary-foreground'
+                          : 'text-foreground'
+                      )}>
+                        Metric (kg/cm)
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+
                 <View className="gap-4">
                   <View className="flex-row gap-4">
                     <View className="flex-1">
-                      <Label>Height (cm)</Label>
+                      <Label>Height ({settings.measurementUnit === 'cm' ? 'cm' : 'in'})</Label>
                       <Input
                         keyboardType="numeric"
                         value={formData.height}
                         onChangeText={(text) => setFormData({ ...formData, height: text })}
-                        placeholder="175"
+                        placeholder={settings.measurementUnit === 'cm' ? '175' : '69'}
                         className="mt-1"
                       />
                     </View>
                     <View className="flex-1">
-                      <Label>Weight (kg)</Label>
+                      <Label>Weight ({settings.unit === 'kg' ? 'kg' : 'lbs'})</Label>
                       <Input
                         keyboardType="numeric"
                         value={formData.weight}
                         onChangeText={(text) => setFormData({ ...formData, weight: text })}
-                        placeholder="80"
+                        placeholder={settings.unit === 'kg' ? '80' : '176'}
                         className="mt-1"
                       />
                     </View>

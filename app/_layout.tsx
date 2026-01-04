@@ -29,6 +29,7 @@ import { dataService, getActiveServiceName, isUsingCloudService } from '@/servic
 import { useAppStore } from '@/store/useAppStore';
 import { useDataInitialization } from '@/hooks/useDataInitialization';
 import { supabase } from '@/lib/supabase';
+import { initializeExerciseLookup } from '@/hooks/useExercises';
 
 /**
  * Extract OAuth tokens from a deep link URL
@@ -234,6 +235,18 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [session, profileChecked, user, setUser, completeOnboarding]);
 
+  // Initialize exercise lookup cache for sync access
+  useEffect(() => {
+    if (session && profileChecked && isUsingCloudService()) {
+      // Initialize exercise cache in background
+      initializeExerciseLookup().catch((error) => {
+        if (__DEV__) {
+          console.log('⚠️ Failed to initialize exercise cache:', error);
+        }
+      });
+    }
+  }, [session, profileChecked]);
+
   // Handle routing based on auth state
   useEffect(() => {
     if (isAuthLoading || isProfileLoading) return;
@@ -363,7 +376,6 @@ function DataInitializer({ children }: { children: React.ReactNode }) {
 
   return <>{children}</>;
 }
-
 
 export default function RootLayout() {
   // Initialize and log data service on mount

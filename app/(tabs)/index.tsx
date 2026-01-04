@@ -83,9 +83,9 @@ export default function Dashboard() {
   };
 
   const todayMacros = {
-    protein: { current: 145, target: nutritionTargets?.protein || 180 },
-    carbs: { current: 220, target: nutritionTargets?.carbs || 300 },
-    fats: { current: 55, target: nutritionTargets?.fats || 70 },
+    protein: { current: nutritionTargets?.protein, target: nutritionTargets?.protein || 180 },
+    carbs: { current: nutritionTargets?.carbs, target: nutritionTargets?.carbs || 300 },
+    fats: { current: nutritionTargets?.fats, target: nutritionTargets?.fats || 70 },
   };
 
   // Get active workout plan (first active one or first plan)

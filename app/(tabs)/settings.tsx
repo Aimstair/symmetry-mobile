@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useAppStore } from '@/store/useAppStore';
 import { supabase } from '@/lib/supabase';
+import { calculateNutritionTargets } from '@/utils/nutrition';
 import { 
   Dialog,
   DialogContent,
@@ -44,7 +45,7 @@ import {
   Edit3,
   Save
 } from 'lucide-react-native';
-import { cn } from '@/lib/utils';
+import { cn, convert } from '@/lib/utils';
 import type { User as UserType } from '@/types';
 
 export default function Settings() {
@@ -56,6 +57,7 @@ export default function Settings() {
   const section4Anim = useRef(new Animated.Value(0)).current;
   const section5Anim = useRef(new Animated.Value(0)).current;
   const section6Anim = useRef(new Animated.Value(0)).current;
+  const section7Anim = useRef(new Animated.Value(0)).current;
 
   // Get store data and actions
   const user = useAppStore((s) => s.user);
@@ -67,6 +69,8 @@ export default function Settings() {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const resetStore = useAppStore((s) => s.resetStore);
   const isLoading = useAppStore((s) => s.isLoading);
+  const workoutPlans = useAppStore((s) => s.workoutPlans);
+  const syncUpdateNutritionTargets = useAppStore((s) => s.syncUpdateNutritionTargets);
 
   // Profile editing state
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -83,16 +87,27 @@ export default function Settings() {
   // Update form when user changes
   useEffect(() => {
     if (user) {
+      // Convert stored metric values to display unit if needed
+      let displayHeight = user.height?.toString() || '';
+      let displayWeight = user.weight?.toString() || '';
+
+      if (settings.measurementUnit === 'in' && user.height) {
+        displayHeight = convert.toIn(user.height).toString();
+      }
+      if (settings.unit === 'lbs' && user.weight) {
+        displayWeight = convert.toLbs(user.weight).toString();
+      }
+
       setProfileForm({
         name: user.name || '',
         age: user.age?.toString() || '',
         gender: user.gender || 'male',
-        height: user.height?.toString() || '',
-        weight: user.weight?.toString() || '',
+        height: displayHeight,
+        weight: displayWeight,
         goal: user.goal || 'maintenance',
       });
     }
-  }, [user]);
+  }, [user, settings.unit, settings.measurementUnit]);
 
   useFocusEffect(
     useCallback(() => {
@@ -103,6 +118,7 @@ export default function Settings() {
       section4Anim.setValue(0);
       section5Anim.setValue(0);
       section6Anim.setValue(0);
+      section7Anim.setValue(0);
       
       Animated.stagger(60, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
@@ -112,8 +128,9 @@ export default function Settings() {
         Animated.timing(section4Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section5Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section6Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
+        Animated.timing(section7Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
       ]).start();
-    }, [headerAnim, section1Anim, section2Anim, section3Anim, section4Anim, section5Anim, section6Anim])
+    }, [headerAnim, section1Anim, section2Anim, section3Anim, section4Anim, section5Anim, section6Anim, section7Anim])
   );
 
   const createAnimStyle = (anim: Animated.Value) => ({
@@ -126,15 +143,47 @@ export default function Settings() {
     if (!user) return;
     
     try {
-      await syncUpdateUserToCloud(user.id, {
+      // Convert input values to metric if user is in imperial mode
+      // (Database always stores metric)
+      let heightInCm = parseFloat(profileForm.height) || user.height;
+      let weightInKg = parseFloat(profileForm.weight) || user.weight;
+
+      if (settings.measurementUnit === 'in') {
+        heightInCm = convert.toCm(parseFloat(profileForm.height) || user.height);
+      }
+      if (settings.unit === 'lbs') {
+        weightInKg = convert.toKg(parseFloat(profileForm.weight) || user.weight);
+      }
+
+      const updatedUser = await syncUpdateUserToCloud(user.id, {
         name: profileForm.name,
         age: parseInt(profileForm.age) || user.age,
         gender: profileForm.gender as UserType['gender'],
-        height: parseFloat(profileForm.height) || user.height,
-        weight: parseFloat(profileForm.weight) || user.weight,
+        height: heightInCm,
+        weight: weightInKg,
         goal: profileForm.goal as UserType['goal'],
       });
+
+      // B. Recalculate Nutrition Targets using metric values
+      // We assume workout frequency from the first plan, or default to 3 (Moderate)
+      const frequency = workoutPlans[0]?.daysPerWeek || 3;
+      
+      const newTargets = calculateNutritionTargets(
+        {
+          weight: updatedUser.weight,
+          height: updatedUser.height,
+          age: updatedUser.age,
+          gender: updatedUser.gender,
+          goal: updatedUser.goal,
+        },
+        frequency
+      );
+
+      // C. Save New Targets
+      await syncUpdateNutritionTargets(newTargets);
+
       setShowProfileEdit(false);
+
     } catch (error) {
       console.error('Failed to update profile:', error);
       Alert.alert('Error', 'Failed to update profile. Please try again.');
@@ -315,8 +364,96 @@ export default function Settings() {
             </Pressable>
           </Animated.View>
 
-          {/* Gym & Training Section */}
+          {/* Preferences Section */}
           <Animated.View style={createAnimStyle(section2Anim)} className="mb-6">
+            <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+              Preferences
+            </Text>
+            <GlassCard className="gap-4">
+              <View>
+                <Text className="text-sm font-medium text-foreground mb-3">Weight Unit</Text>
+                <View className="flex-row gap-2">
+                  <Pressable
+                    onPress={() => updateSettings({ unit: 'lbs' })}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                    className={cn(
+                      "flex-1 py-3 px-4 rounded-lg border-2",
+                      settings.unit === 'lbs'
+                        ? "bg-primary/20 border-primary"
+                        : "bg-card/50 border-border"
+                    )}
+                  >
+                    <Text className={cn(
+                      "text-center font-semibold",
+                      settings.unit === 'lbs' ? "text-primary" : "text-muted-foreground"
+                    )}>
+                      Imperial (lbs)
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => updateSettings({ unit: 'kg' })}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                    className={cn(
+                      "flex-1 py-3 px-4 rounded-lg border-2",
+                      settings.unit === 'kg'
+                        ? "bg-primary/20 border-primary"
+                        : "bg-card/50 border-border"
+                    )}
+                  >
+                    <Text className={cn(
+                      "text-center font-semibold",
+                      settings.unit === 'kg' ? "text-primary" : "text-muted-foreground"
+                    )}>
+                      Metric (kg)
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+
+              <View>
+                <Text className="text-sm font-medium text-foreground mb-3">Height Unit</Text>
+                <View className="flex-row gap-2">
+                  <Pressable
+                    onPress={() => updateSettings({ measurementUnit: 'in' })}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                    className={cn(
+                      "flex-1 py-3 px-4 rounded-lg border-2",
+                      settings.measurementUnit === 'in'
+                        ? "bg-primary/20 border-primary"
+                        : "bg-card/50 border-border"
+                    )}
+                  >
+                    <Text className={cn(
+                      "text-center font-semibold",
+                      settings.measurementUnit === 'in' ? "text-primary" : "text-muted-foreground"
+                    )}>
+                      Imperial (in)
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => updateSettings({ measurementUnit: 'cm' })}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                    className={cn(
+                      "flex-1 py-3 px-4 rounded-lg border-2",
+                      settings.measurementUnit === 'cm'
+                        ? "bg-primary/20 border-primary"
+                        : "bg-card/50 border-border"
+                    )}
+                  >
+                    <Text className={cn(
+                      "text-center font-semibold",
+                      settings.measurementUnit === 'cm' ? "text-primary" : "text-muted-foreground"
+                    )}>
+                      Metric (cm)
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            </GlassCard>
+          </Animated.View>
+
+          {/* Gym & Training Section */}
+          <Animated.View style={createAnimStyle(section3Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Gym & Training
             </Text>
@@ -350,7 +487,7 @@ export default function Settings() {
           </Animated.View>
 
           {/* Calculators Section */}
-          <Animated.View style={createAnimStyle(section3Anim)} className="mb-6">
+          <Animated.View style={createAnimStyle(section4Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Calculators
             </Text>
@@ -372,7 +509,7 @@ export default function Settings() {
           </Animated.View>
 
           {/* Notifications Section */}
-          <Animated.View style={createAnimStyle(section4Anim)} className="mb-6">
+          <Animated.View style={createAnimStyle(section5Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Notifications
             </Text>
@@ -411,7 +548,7 @@ export default function Settings() {
           </Animated.View>
 
           {/* Subscription Section */}
-          <Animated.View style={createAnimStyle(section5Anim)} className="mb-6">
+          <Animated.View style={createAnimStyle(section6Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               Subscription
             </Text>
@@ -450,7 +587,7 @@ export default function Settings() {
           </Animated.View>
 
           {/* App Management Section */}
-          <Animated.View style={createAnimStyle(section6Anim)} className="mb-6">
+          <Animated.View style={createAnimStyle(section7Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
               App Management
             </Text>
@@ -553,21 +690,21 @@ export default function Settings() {
 
             <View className="flex-row gap-4">
               <View className="flex-1">
-                <Label>Height (in)</Label>
+                <Label>Height ({settings.measurementUnit === 'cm' ? 'cm' : 'in'})</Label>
                 <Input 
                   value={profileForm.height}
                   onChangeText={(text) => setProfileForm({ ...profileForm, height: text })}
-                  placeholder="70"
+                  placeholder={settings.measurementUnit === 'cm' ? '175' : '69'}
                   keyboardType="numeric"
                   className="mt-1"
                 />
               </View>
               <View className="flex-1">
-                <Label>Weight (lbs)</Label>
+                <Label>Weight ({settings.unit === 'kg' ? 'kg' : 'lbs'})</Label>
                 <Input 
                   value={profileForm.weight}
                   onChangeText={(text) => setProfileForm({ ...profileForm, weight: text })}
-                  placeholder="180"
+                  placeholder={settings.unit === 'kg' ? '80' : '176'}
                   keyboardType="numeric"
                   className="mt-1"
                 />
