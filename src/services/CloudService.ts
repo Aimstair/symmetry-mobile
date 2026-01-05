@@ -24,6 +24,7 @@ import type {
   IHistoryService,
   IProgressService,
   IUserService,
+  IScheduleService,
 } from './interfaces';
 import type {
   User,
@@ -43,6 +44,10 @@ import type {
   ExerciseCacheMetadata,
   CreateWorkoutPlanInput,
   SaveWorkoutSessionInput,
+  ScheduledWorkout,
+  TrainingDaysHistory,
+  WorkoutDaySnapshot,
+  ScheduleStatus,
 } from '@/types';
 
 // ============================================================================
@@ -1246,27 +1251,44 @@ class CloudUserService implements IUserService {
     }
     
     try {
+      // Use maybeSingle() instead of single() to avoid hanging on timeout
       const { data, error } = await supabase
         .from('users')
         .select('*')
         .eq('id', userId)
-        .single();
+        .maybeSingle();
 
       if (__DEV__) {
-        console.log('☁️ CloudService.getUser result:', { hasData: !!data, error: error?.message || null });
+        console.log('☁️ CloudService.getUser result:', { 
+          hasData: !!data, 
+          error: error?.message || null,
+          errorCode: error?.code || null,
+          queriedUserId: userId,
+          foundUserId: data?.id || null,
+          foundEmail: data?.email || null
+        });
       }
 
       if (error) {
-        if (error.code === 'PGRST116') {
-          if (__DEV__) {
-            console.log('☁️ User not found (PGRST116), returning null');
-          }
-          return null;
-        }
+        console.error('☁️ CloudService.getUser error:', error);
         throw new Error(`Failed to fetch user: ${error.message}`);
       }
 
-      if (!data) return null;
+      if (!data) {
+        if (__DEV__) {
+          console.log('☁️ User not found for ID:', userId);
+          // Check if there are ANY users in the table (for debugging)
+          const { data: allUsers, error: countError } = await supabase
+            .from('users')
+            .select('id, email')
+            .limit(5);
+          
+          if (!countError && allUsers) {
+            console.log('☁️ Sample users in database:', allUsers);
+          }
+        }
+        return null;
+      }
 
       return {
         id: data.id,
@@ -1338,10 +1360,33 @@ class CloudUserService implements IUserService {
   }
 
   async createUser(user: User): Promise<User> {
+    // CRITICAL: Validate that user.id matches the current auth session
+    const { data: { session } } = await supabase.auth.getSession();
+    
+    if (!session?.user?.id) {
+      throw new Error('No authenticated session found. Please sign in first.');
+    }
+    
+    if (user.id !== session.user.id) {
+      console.error('❌ User ID mismatch!', {
+        providedId: user.id,
+        authUserId: session.user.id,
+        email: user.email,
+      });
+      throw new Error(
+        `User ID mismatch: Provided ID (${user.id}) does not match authenticated user ID (${session.user.id}). ` +
+        `The user.id MUST be set to the Supabase auth.uid().`
+      );
+    }
+    
+    if (__DEV__) {
+      console.log('☁️ Creating user with auth.uid():', user.id);
+    }
+    
     const { data, error } = await supabase
       .from('users')
       .insert({
-        id: user.id,
+        id: user.id, // This MUST match auth.uid() - enforced by trigger
         name: user.name,
         email: user.email,
         age: user.age,
@@ -1355,7 +1400,14 @@ class CloudUserService implements IUserService {
       .select()
       .single();
 
-    if (error) throw new Error(`Failed to create user: ${error.message}`);
+    if (error) {
+      console.error('❌ Failed to create user:', error);
+      throw new Error(`Failed to create user: ${error.message}`);
+    }
+    
+    if (__DEV__) {
+      console.log('✅ User created successfully:', data.id);
+    }
 
     return {
       id: data.id,
@@ -1464,6 +1516,205 @@ class CloudUserService implements IUserService {
 }
 
 // ============================================================================
+// SCHEDULE SERVICE (Date-Specific Workout Planning)
+// ============================================================================
+
+class CloudScheduleService implements IScheduleService {
+  /**
+   * Get scheduled workouts for a date range
+   */
+  async getScheduledWorkouts(
+    userId: string,
+    startDate: Date,
+    endDate: Date
+  ): Promise<ScheduledWorkout[]> {
+    const startStr = startDate.toISOString().split('T')[0];
+    const endStr = endDate.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('workout_schedule')
+      .select('*')
+      .eq('user_id', userId)
+      .gte('scheduled_date', startStr)
+      .lte('scheduled_date', endStr)
+      .order('scheduled_date', { ascending: true });
+
+    if (error) {
+      console.error('Failed to fetch scheduled workouts:', error);
+      throw new Error(`Failed to fetch scheduled workouts: ${error.message}`);
+    }
+
+    return (data || []).map(this.mapScheduleRow);
+  }
+
+  /**
+   * Get scheduled workout for a specific date
+   */
+  async getScheduledWorkout(userId: string, date: Date): Promise<ScheduledWorkout | null> {
+    const dateStr = date.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('workout_schedule')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('scheduled_date', dateStr)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Failed to fetch scheduled workout:', error);
+      throw new Error(`Failed to fetch scheduled workout: ${error.message}`);
+    }
+
+    return data ? this.mapScheduleRow(data) : null;
+  }
+
+  /**
+   * Schedule a workout on a specific date
+   */
+  async scheduleWorkout(
+    userId: string,
+    date: Date,
+    workoutPlanId: string | null,
+    workoutSnapshot: WorkoutDaySnapshot
+  ): Promise<ScheduledWorkout> {
+    const dateStr = date.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('workout_schedule')
+      .upsert({
+        user_id: userId,
+        scheduled_date: dateStr,
+        workout_plan_id: workoutPlanId,
+        workout_snapshot: workoutSnapshot,
+        status: 'scheduled',
+      }, { onConflict: 'user_id,scheduled_date' })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to schedule workout:', error);
+      throw new Error(`Failed to schedule workout: ${error.message}`);
+    }
+
+    if (__DEV__) {
+      console.log('✅ Workout scheduled for:', dateStr);
+    }
+
+    return this.mapScheduleRow(data);
+  }
+
+  /**
+   * Update scheduled workout status
+   */
+  async updateScheduleStatus(
+    scheduleId: string,
+    status: ScheduleStatus,
+    sessionId?: string
+  ): Promise<ScheduledWorkout> {
+    const updates: any = { status };
+    if (sessionId) {
+      updates.session_id = sessionId;
+    }
+
+    const { data, error } = await supabase
+      .from('workout_schedule')
+      .update(updates)
+      .eq('id', scheduleId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Failed to update schedule status:', error);
+      throw new Error(`Failed to update schedule status: ${error.message}`);
+    }
+
+    return this.mapScheduleRow(data);
+  }
+
+  /**
+   * Delete a scheduled workout
+   */
+  async deleteScheduledWorkout(scheduleId: string): Promise<void> {
+    const { error } = await supabase
+      .from('workout_schedule')
+      .delete()
+      .eq('id', scheduleId);
+
+    if (error) {
+      console.error('Failed to delete scheduled workout:', error);
+      throw new Error(`Failed to delete scheduled workout: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get training days history for a specific week
+   */
+  async getTrainingDaysForWeek(userId: string, weekStart: Date): Promise<string[]> {
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('training_days_history')
+      .select('training_days')
+      .eq('user_id', userId)
+      .eq('week_start', weekStartStr)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Failed to fetch training days history:', error);
+      // Return empty array on error - will fall back to current training days
+      return [];
+    }
+
+    return data?.training_days || [];
+  }
+
+  /**
+   * Save training days snapshot for current week
+   */
+  async saveTrainingDaysSnapshot(userId: string, trainingDays: string[]): Promise<void> {
+    // Get Monday of current week
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const diff = now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+    const weekStart = new Date(now.setDate(diff));
+    weekStart.setHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().split('T')[0];
+
+    const { error } = await supabase
+      .from('training_days_history')
+      .upsert({
+        user_id: userId,
+        week_start: weekStartStr,
+        training_days: trainingDays,
+      }, { onConflict: 'user_id,week_start' });
+
+    if (error) {
+      console.error('Failed to save training days snapshot:', error);
+      throw new Error(`Failed to save training days snapshot: ${error.message}`);
+    }
+
+    if (__DEV__) {
+      console.log('✅ Training days snapshot saved for week:', weekStartStr);
+    }
+  }
+
+  private mapScheduleRow(row: any): ScheduledWorkout {
+    return {
+      id: row.id,
+      userId: row.user_id,
+      scheduledDate: new Date(row.scheduled_date),
+      workoutPlanId: row.workout_plan_id,
+      workoutSnapshot: row.workout_snapshot || { name: '', muscleGroups: [], exercises: [] },
+      status: row.status,
+      sessionId: row.session_id,
+      notes: row.notes,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    };
+  }
+}
+
+// ============================================================================
 // MAIN CLOUD SERVICE
 // ============================================================================
 
@@ -1473,6 +1724,7 @@ export class CloudDataService implements IDataService {
   history: IHistoryService;
   progress: IProgressService;
   user: IUserService;
+  schedule: IScheduleService;
 
   constructor() {
     this.exercise = new CloudExerciseService();
@@ -1480,6 +1732,7 @@ export class CloudDataService implements IDataService {
     this.history = new CloudHistoryService();
     this.progress = new CloudProgressService();
     this.user = new CloudUserService();
+    this.schedule = new CloudScheduleService();
   }
 }
 

@@ -151,6 +151,55 @@ export interface Exercise {
 }
 
 // ============================================================================
+// WORKOUT SCHEDULING TYPES (Date-Specific Planning)
+// ============================================================================
+
+/**
+ * Status of a scheduled workout
+ */
+export type ScheduleStatus = 'scheduled' | 'completed' | 'skipped' | 'rest';
+
+/**
+ * Scheduled workout for a specific date
+ * This decouples the weekly template from specific dates
+ */
+export interface ScheduledWorkout {
+  id: string;
+  userId: string;
+  scheduledDate: Date; // The specific date (YYYY-MM-DD)
+  workoutPlanId?: string; // Reference to source plan template
+  workoutSnapshot: WorkoutDaySnapshot; // Frozen copy of what was planned
+  status: ScheduleStatus;
+  sessionId?: string; // Reference to completed session (if status = 'completed')
+  notes?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Snapshot of a workout day (frozen at schedule time)
+ * This preserves what was planned even if the template changes later
+ */
+export interface WorkoutDaySnapshot {
+  name: string;
+  muscleGroups: string[];
+  exercises: PlanExercise[];
+  dayName?: string;
+}
+
+/**
+ * Training days snapshot for a specific week
+ * Preserves what training days were active during historical weeks
+ */
+export interface TrainingDaysHistory {
+  id: string;
+  userId: string;
+  weekStart: Date; // Monday of that week
+  trainingDays: string[]; // e.g., ['Monday', 'Wednesday', 'Friday']
+  createdAt: Date;
+}
+
+// ============================================================================
 // WORKOUT HISTORY TYPES (Session Tracking)
 // ============================================================================
 

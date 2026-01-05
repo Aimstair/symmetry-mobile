@@ -203,24 +203,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
               console.log('🔍 Fetching user profile for ID:', session.user.id);
             }
             
-            // Add timeout to prevent infinite hang
-            const timeoutPromise = new Promise<null>((_, reject) => 
-              setTimeout(() => reject(new Error('Profile fetch timeout after 10s')), 10000)
-            );
-            
-            let cloudUser: Awaited<ReturnType<typeof dataService.user.getUser>> = null;
-            try {
-              cloudUser = await Promise.race([
-                dataService.user.getUser(session.user.id),
-                timeoutPromise
-              ]);
-            } catch (fetchError) {
-              if (__DEV__) {
-                console.log('⚠️ User fetch error/timeout:', fetchError);
-              }
-              // Treat timeout/error as user not found - redirect to onboarding
-              cloudUser = null;
-            }
+            const cloudUser = await dataService.user.getUser(session.user.id);
             
             if (__DEV__) {
               console.log('🔍 User fetch result:', cloudUser ? `Found: ${cloudUser.email}` : 'Not found');

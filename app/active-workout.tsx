@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle } from 'react-native-svg';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useAppStore } from '@/store/useAppStore';
-import { getCurrentWeekCalendar } from '@/utils/workoutCalendar';
+import { getCurrentWeekCalendar, normalizeDayName } from '@/utils/workoutCalendar';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -122,20 +122,22 @@ export default function ActiveWorkout() {
   const [showCompletionModal, setShowCompletionModal] = useState(false);
 
   // Resolve current workout plan and day
-  const { currentPlan, currentDay } = useMemo(() => {
+  const { currentPlan, currentDay, loadError } = useMemo(() => {
     if (!activeWorkout.isActive || !activeWorkout.workoutId) {
-      return { currentPlan: null, currentDay: null };
+      return { currentPlan: null, currentDay: null, loadError: 'No active workout' };
     }
 
     // Find the active workout plan
     const plan = workoutPlans.find((p) => p.id === activeWorkout.workoutId);
     if (!plan) {
-      return { currentPlan: null, currentDay: null };
+      return { currentPlan: null, currentDay: null, loadError: 'Workout plan not found' };
     }
 
-    // Determine today's workout day using the calendar utility
+    // Get user's training days and normalize them for consistent matching
     const user = useAppStore.getState().user;
-    const trainingDays = user?.trainingDays || [];
+    const trainingDays = (user?.trainingDays || []).map(d => normalizeDayName(d));
+    
+    // Determine today's workout day using the calendar utility
     const calendarDays = getCurrentWeekCalendar(plan, trainingDays);
     const today = new Date();
     const todayCalendarDay = calendarDays.find(
@@ -145,10 +147,30 @@ export default function ActiveWorkout() {
         day.fullDate.getFullYear() === today.getFullYear()
     );
 
-    // Get the workout day (or fallback to first day if not scheduled)
-    const workoutDay = todayCalendarDay?.workoutDay || plan.workoutDays[0] || null;
+    // Try to get today's workout day
+    let workoutDay = todayCalendarDay?.workoutDay || null;
+    
+    // Fallback 1: Try to find workout day by matching today's day name directly
+    if (!workoutDay && plan.workoutDays.length > 0) {
+      const todayDayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][today.getDay()];
+      workoutDay = plan.workoutDays.find(wd => 
+        wd.dayName && normalizeDayName(wd.dayName).toLowerCase() === todayDayName.toLowerCase()
+      ) || null;
+    }
+    
+    // Fallback 2: Use first workout day with exercises
+    if (!workoutDay && plan.workoutDays.length > 0) {
+      workoutDay = plan.workoutDays.find(wd => wd.exercises && wd.exercises.length > 0) || plan.workoutDays[0];
+      if (__DEV__) {
+        console.log('⚠️ Using fallback workout day:', workoutDay?.name);
+      }
+    }
 
-    return { currentPlan: plan, currentDay: workoutDay };
+    if (!workoutDay) {
+      return { currentPlan: plan, currentDay: null, loadError: 'No workout scheduled for today' };
+    }
+
+    return { currentPlan: plan, currentDay: workoutDay, loadError: null };
   }, [activeWorkout, workoutPlans]);
 
   // Redirect if no active workout
@@ -368,11 +390,45 @@ export default function ActiveWorkout() {
     : 0;
   const strokeDashoffset = circumference * (1 - restProgress);
 
-  // Show loading if no workout data yet
+  // Show error state if workout cannot be loaded
   if (!currentDay && activeWorkout.isActive) {
     return (
-      <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
-        <Text className="text-muted-foreground">Loading workout...</Text>
+      <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center px-6">
+        <Dumbbell size={48} color="#71717A" />
+        <Text className="text-foreground text-lg font-semibold mt-4 text-center">
+          {loadError || 'Unable to load workout'}
+        </Text>
+        <Text className="text-muted-foreground text-center mt-2">
+          {currentPlan ? 
+            'No workout is scheduled for today. You can still add exercises or go back.' :
+            'The workout plan could not be found.'
+          }
+        </Text>
+        <View className="flex-row gap-4 mt-6">
+          <Button 
+            variant="outline"
+            onPress={() => {
+              endWorkout();
+              router.replace('/(tabs)/workout-plan');
+            }}
+          >
+            <Text className="text-muted-foreground">Go Back</Text>
+          </Button>
+          {currentPlan && currentPlan.workoutDays.length > 0 && (
+            <Button 
+              className="bg-primary"
+              onPress={() => {
+                // Use the first available workout day as fallback
+                const fallbackDay = currentPlan.workoutDays[0];
+                if (fallbackDay?.exercises && fallbackDay.exercises.length > 0) {
+                  setExercises(convertToSessionExercises(fallbackDay.exercises));
+                }
+              }}
+            >
+              <Text className="text-primary-foreground">Start Anyway</Text>
+            </Button>
+          )}
+        </View>
       </SafeAreaView>
     );
   }

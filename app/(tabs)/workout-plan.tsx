@@ -33,6 +33,7 @@ import {
   formatMonthYear,
   findTodayIndex,
   mapWorkoutPlanToWeek,
+  normalizeDayName,
 } from '@/utils/workoutCalendar';
 import { generateSingleDayWorkout } from '@/utils/aiPlanner';
 import type { WorkoutDay } from '@/types';
@@ -143,12 +144,29 @@ export default function WorkoutPlanScreen() {
   // Handler: Confirm active day creation from modal
   const handleConfirmActiveDay = useCallback(async (workoutName: string, muscleGroups: string[]) => {
     if (!user || !activePlan) return;
-    const dayName = pendingActiveDayName;
+    
+    // Normalize the day name to ensure consistent format (e.g., 'Thu' -> 'Thursday')
+    const dayName = normalizeDayName(pendingActiveDayName);
 
     try {
-      // Add this day to user's training days
-      const newTrainingDays = [...trainingDays, dayName];
-      await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
+      // Add this day to user's training days (normalized for consistency)
+      // Also normalize existing training days to prevent duplicates
+      const normalizedExisting = trainingDays.map(d => normalizeDayName(d));
+      const newTrainingDays = normalizedExisting.includes(dayName) 
+        ? normalizedExisting 
+        : [...normalizedExisting, dayName];
+      
+      if (__DEV__) {
+        console.log('📅 Activating day:', dayName);
+        console.log('📅 New training days:', newTrainingDays);
+      }
+      
+      // Update user's training days and WAIT for store to update
+      const updatedUser = await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
+      
+      if (__DEV__) {
+        console.log('📅 User updated with training days:', updatedUser?.trainingDays);
+      }
 
       // Create a new workout day with the selected muscle groups (no exercises yet)
       const dayIndex = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(dayName);
@@ -162,7 +180,7 @@ export default function WorkoutPlanScreen() {
         id: `wd-${Date.now()}`,
         planId: activePlan.id,
         name: workoutName,
-        dayName: dayName, // Store which day of the week this workout belongs to
+        dayName: dayName, // Store normalized day name (e.g., 'Thursday' not 'Thu')
         orderIndex: nextOrderIndex,
         muscleGroups: muscleGroups,
         exercises: [], // Empty - user will add exercises later
@@ -171,6 +189,10 @@ export default function WorkoutPlanScreen() {
       };
 
       await syncAddWorkoutDayToCloud(activePlan.id, newWorkoutDay);
+      
+      if (__DEV__) {
+        console.log('📅 Workout day created:', newWorkoutDay.name, 'for', dayName);
+      }
       
       setShowActiveDayModal(false);
       setPendingActiveDayName('');
@@ -184,10 +206,13 @@ export default function WorkoutPlanScreen() {
   // Handler: Turn active day into rest day
   const handleMakeRestDay = useCallback(async (dayName: string, workoutDayId?: string) => {
     if (!user || !activePlan) return;
+    
+    // Normalize the day name for consistent comparison
+    const normalizedDayName = normalizeDayName(dayName);
 
     Alert.alert(
       'Rest Day',
-      `Make ${dayName} a rest day? The scheduled workout will be removed.`,
+      `Make ${normalizedDayName} a rest day? The scheduled workout will be removed.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -196,7 +221,16 @@ export default function WorkoutPlanScreen() {
           onPress: async () => {
             try {
               // Remove this day from user's training days
-              const newTrainingDays = trainingDays.filter((d) => d !== dayName);
+              // Compare normalized names to ensure we find the right day
+              const newTrainingDays = trainingDays.filter(
+                (d) => normalizeDayName(d) !== normalizedDayName
+              );
+              
+              if (__DEV__) {
+                console.log('📅 Removing day:', normalizedDayName);
+                console.log('📅 New training days:', newTrainingDays);
+              }
+              
               await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
 
               // Remove the workout day from the plan
@@ -204,7 +238,7 @@ export default function WorkoutPlanScreen() {
                 await syncRemoveWorkoutDayFromCloud(activePlan.id, workoutDayId);
               }
 
-              Alert.alert('Rest Day Set', `${dayName} is now a rest day.`);
+              Alert.alert('Rest Day Set', `${normalizedDayName} is now a rest day.`);
             } catch (error) {
               console.error('Failed to make rest day:', error);
               Alert.alert('Error', 'Failed to set rest day. Please try again.');

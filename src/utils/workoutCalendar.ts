@@ -14,6 +14,31 @@ import type { WorkoutPlan, WorkoutDay } from '@/types';
 export type DayStatus = 'completed' | 'today' | 'upcoming' | 'rest' | 'skipped' | 'no-workout';
 
 /**
+ * Day name mapping for normalization
+ * Converts any form (abbreviated or full) to full day name
+ */
+const DAY_NAME_MAP: Record<string, string> = {
+  'sun': 'Sunday', 'sunday': 'Sunday',
+  'mon': 'Monday', 'monday': 'Monday',
+  'tue': 'Tuesday', 'tues': 'Tuesday', 'tuesday': 'Tuesday',
+  'wed': 'Wednesday', 'wednesday': 'Wednesday',
+  'thu': 'Thursday', 'thur': 'Thursday', 'thurs': 'Thursday', 'thursday': 'Thursday',
+  'fri': 'Friday', 'friday': 'Friday',
+  'sat': 'Saturday', 'saturday': 'Saturday',
+};
+
+/**
+ * Normalize day name to full format (e.g., 'Thu' -> 'Thursday')
+ * This ensures consistency between user.trainingDays and workoutDay.dayName
+ */
+export function normalizeDayName(dayName: string): string {
+  const normalized = DAY_NAME_MAP[dayName.toLowerCase().trim()];
+  if (normalized) return normalized;
+  // If not found, return original with first letter capitalized
+  return dayName.charAt(0).toUpperCase() + dayName.slice(1).toLowerCase();
+}
+
+/**
  * Calendar day representation for UI
  */
 export interface CalendarDay {
@@ -87,6 +112,11 @@ export function isBeforeToday(date: Date, today: Date): boolean {
 
 /**
  * Determine the status of a calendar day
+ * 
+ * FIXED: No longer auto-completes past days. Past training days are:
+ * - 'completed' only if in completedDates set
+ * - 'skipped' if it was a training day but not completed
+ * - 'rest' if it was a rest day
  */
 export function getDayStatus(
   date: Date,
@@ -96,23 +126,27 @@ export function getDayStatus(
 ): DayStatus {
   const dateString = date.toISOString().split('T')[0];
   
+  // Rest days are always 'rest' regardless of past/present/future
   if (isRestDay) {
     return 'rest';
   }
   
+  // Check if this training day was actually completed
   if (completedDates?.has(dateString)) {
     return 'completed';
   }
   
+  // Today's training day
   if (isSameDay(date, today)) {
     return 'today';
   }
   
+  // Past training day that was NOT completed = skipped
   if (isBeforeToday(date, today)) {
-    // Could be 'skipped' if not completed - for now, assume completed
-    return 'completed';
+    return 'skipped';
   }
   
+  // Future training day
   return 'upcoming';
 }
 
@@ -121,35 +155,48 @@ export function getDayStatus(
  * 
  * Strategy:
  * 1. Use trainingDays from user to determine which days are training days
- * 2. Map each calendar training day to the appropriate workout day based on sequence
- * 3. Training days without a workout show "No Workout Planned"
- * 4. Non-training days are rest days
+ * 2. For CURRENT and FUTURE weeks: Map each calendar training day to the appropriate workout day
+ * 3. For PAST weeks: Only show actual completed sessions, not the plan template
+ * 4. Training days without a workout show "No Workout Planned"
+ * 5. Non-training days are rest days
  * 
  * @param plan - The workout plan template (can be null)
  * @param weekStart - The Monday of the week to generate
  * @param trainingDays - User's selected training days (e.g., ['Monday', 'Wednesday', 'Friday'])
  * @param completedDates - Set of ISO date strings for completed workouts
+ * @param completedSessions - Map of date strings to workout names (for past weeks history)
  */
 export function mapWorkoutPlanToWeek(
   plan: WorkoutPlan | null,
   weekStart: Date,
   trainingDays: string[] = [],
-  completedDates?: Set<string>
+  completedDates?: Set<string>,
+  completedSessions?: Map<string, { name: string; muscles: string[] }>
 ): CalendarDay[] {
   const today = new Date();
+  today.setHours(0, 0, 0, 0);
   const weekDates = getWeekDates(weekStart);
   
-  // Map day names to day of week index for matching
-  const trainingDaySet = new Set(trainingDays.map(d => d.toLowerCase()));
+  // Determine if this is a past week (week ends before today)
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  const isPastWeek = weekEnd < today;
+  
+  // Normalize training days for consistent matching
+  // Handles both 'Thu' and 'Thursday' formats
+  const normalizedTrainingDays = trainingDays.map(d => normalizeDayName(d).toLowerCase());
+  const trainingDaySet = new Set(normalizedTrainingDays);
   
   // Get workout days from plan (if exists)
   const workoutDays = plan?.workoutDays || [];
   
-  // Create a map of dayName -> WorkoutDay for O(1) lookup
+  // Create a map of normalized dayName -> WorkoutDay for O(1) lookup
   const workoutDayByDayName = new Map<string, typeof workoutDays[0]>();
   workoutDays.forEach(wd => {
     if (wd.dayName) {
-      workoutDayByDayName.set(wd.dayName.toLowerCase(), wd);
+      const normalized = normalizeDayName(wd.dayName).toLowerCase();
+      workoutDayByDayName.set(normalized, wd);
     }
   });
   
@@ -159,8 +206,61 @@ export function mapWorkoutPlanToWeek(
   
   return weekDates.map((date) => {
     const dayName = getFullDayName(date);
-    const isTrainingDay = trainingDaySet.has(dayName.toLowerCase());
+    const dayNameLower = dayName.toLowerCase();
+    const dateString = date.toISOString().split('T')[0];
+    const isTrainingDay = trainingDaySet.has(dayNameLower);
+    const wasCompleted = completedDates?.has(dateString) || false;
+    const sessionInfo = completedSessions?.get(dateString);
     
+    // For past weeks, we don't show the plan template
+    // Only show actual completed sessions
+    if (isPastWeek) {
+      if (wasCompleted && sessionInfo) {
+        // Past day with a completed session - show what was actually done
+        return {
+          day: getDayName(date),
+          date: date.getDate(),
+          fullDate: date,
+          name: sessionInfo.name,
+          muscles: sessionInfo.muscles,
+          status: 'completed' as DayStatus,
+          exercises: 0, // We don't have exercise count for past sessions
+          workoutDay: null,
+          isRestDay: false,
+          isTrainingDay: true,
+        };
+      } else if (wasCompleted) {
+        // Past day was completed but we don't have session details
+        return {
+          day: getDayName(date),
+          date: date.getDate(),
+          fullDate: date,
+          name: 'Workout Completed',
+          muscles: [],
+          status: 'completed' as DayStatus,
+          exercises: 0,
+          workoutDay: null,
+          isRestDay: false,
+          isTrainingDay: true,
+        };
+      } else {
+        // Past day with no completed session - show as rest (blank)
+        return {
+          day: getDayName(date),
+          date: date.getDate(),
+          fullDate: date,
+          name: 'Rest',
+          muscles: [],
+          status: 'rest' as DayStatus,
+          exercises: 0,
+          workoutDay: null,
+          isRestDay: true,
+          isTrainingDay: false,
+        };
+      }
+    }
+    
+    // Current/future week logic - use the plan template
     if (!isTrainingDay) {
       // Rest day (user didn't select this day for training)
       return {
@@ -178,8 +278,8 @@ export function mapWorkoutPlanToWeek(
     }
     
     // This is a training day - find the matching workout
-    // First try to match by dayName
-    let workoutDay = workoutDayByDayName.get(dayName.toLowerCase()) || null;
+    // Use normalized day name for consistent matching
+    let workoutDay = workoutDayByDayName.get(dayNameLower) || null;
     
     // Fallback: use unassigned workouts sequentially (for legacy data)
     if (!workoutDay && unassignedWorkouts.length > 0 && unassignedIndex < unassignedWorkouts.length) {

@@ -18,6 +18,7 @@ import type {
   IHistoryService,
   IProgressService,
   IUserService,
+  IScheduleService,
 } from './interfaces';
 import type {
   User,
@@ -29,6 +30,9 @@ import type {
   EquipmentProfile,
   CatalogExercise,
   ExerciseCacheMetadata,
+  ScheduledWorkout,
+  WorkoutDaySnapshot,
+  ScheduleStatus,
 } from '@/types';
 
 /**
@@ -314,6 +318,50 @@ class LocalHistoryService implements IHistoryService {
 }
 
 /**
+ * Schedule Service - Local Implementation (Stub)
+ */
+class LocalScheduleService implements IScheduleService {
+  async getScheduledWorkouts(userId: string, startDate: Date, endDate: Date): Promise<ScheduledWorkout[]> {
+    // Not implemented for local - return empty
+    return [];
+  }
+
+  async getScheduledWorkout(userId: string, date: Date): Promise<ScheduledWorkout | null> {
+    return null;
+  }
+
+  async scheduleWorkout(
+    userId: string,
+    date: Date,
+    workoutPlanId: string | null,
+    workoutSnapshot: WorkoutDaySnapshot
+  ): Promise<ScheduledWorkout> {
+    throw new Error('scheduleWorkout not implemented in LocalService');
+  }
+
+  async updateScheduleStatus(
+    scheduleId: string,
+    status: ScheduleStatus,
+    sessionId?: string
+  ): Promise<ScheduledWorkout> {
+    throw new Error('updateScheduleStatus not implemented in LocalService');
+  }
+
+  async deleteScheduledWorkout(scheduleId: string): Promise<void> {
+    // No-op
+  }
+
+  async getTrainingDaysForWeek(userId: string, weekStart: Date): Promise<string[]> {
+    // Return empty - will fall back to current training days
+    return [];
+  }
+
+  async saveTrainingDaysSnapshot(userId: string, trainingDays: string[]): Promise<void> {
+    // No-op for local
+  }
+}
+
+/**
  * Main Local Service
  * Export singleton instance
  */
@@ -323,6 +371,7 @@ export class LocalDataService implements IDataService {
   history: IHistoryService;
   progress: IProgressService;
   user: IUserService;
+  schedule: IScheduleService;
 
   constructor() {
     this.exercise = new LocalExerciseService();
@@ -330,6 +379,7 @@ export class LocalDataService implements IDataService {
     this.history = new LocalHistoryService();
     this.progress = new LocalProgressService();
     this.user = new LocalUserService();
+    this.schedule = new LocalScheduleService();
   }
 }
 

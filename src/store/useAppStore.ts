@@ -222,25 +222,26 @@ export const useAppStore = create<AppState>()(
           workoutPlans: state.workoutPlans.map((plan) => {
             if (plan.id !== planId) return plan;
             
-            // Add the new day and re-sort by day order
+            // Add the new day - use dayName for sorting, not name parsing
             const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-            const updatedDays = [...plan.workoutDays, workoutDay];
+            const updatedDays = [...plan.workoutDays.map(d => ({ ...d })), { ...workoutDay }];
             
-            // Sort by day of week extracted from name
+            // Sort by dayName (the actual day of week this workout belongs to)
             updatedDays.sort((a, b) => {
-              const dayA = a.name.split(' - ')[0];
-              const dayB = b.name.split(' - ')[0];
+              const dayA = a.dayName || '';
+              const dayB = b.dayName || '';
               return dayOrder.indexOf(dayA) - dayOrder.indexOf(dayB);
             });
             
-            // Re-index
-            updatedDays.forEach((day, idx) => {
-              day.orderIndex = idx;
-            });
+            // Update orderIndex immutably after sorting
+            const sortedDays = updatedDays.map((day, idx) => ({
+              ...day,
+              orderIndex: idx,
+            }));
             
             return {
               ...plan,
-              workoutDays: updatedDays,
+              workoutDays: sortedDays,
               updatedAt: new Date(),
             };
           }),
@@ -250,12 +251,12 @@ export const useAppStore = create<AppState>()(
           workoutPlans: state.workoutPlans.map((plan) => {
             if (plan.id !== planId) return plan;
             
-            const updatedDays = plan.workoutDays.filter((day) => day.id !== dayId);
-            
-            // Re-index
-            updatedDays.forEach((day, idx) => {
-              day.orderIndex = idx;
-            });
+            // Filter out the removed day - do NOT re-index!
+            // Each workout day is tied to a specific dayName (e.g., 'Monday')
+            // Re-indexing would shift assignments to wrong days
+            const updatedDays = plan.workoutDays
+              .filter((day) => day.id !== dayId)
+              .map((day) => ({ ...day })); // Create new objects to avoid mutation
             
             return {
               ...plan,

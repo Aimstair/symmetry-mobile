@@ -36,6 +36,10 @@ import type {
   ExerciseCacheMetadata,
   CreateWorkoutPlanInput,
   SaveWorkoutSessionInput,
+  ScheduledWorkout,
+  TrainingDaysHistory,
+  WorkoutDaySnapshot,
+  ScheduleStatus,
 } from '@/types';
 
 // ============================================================================
@@ -210,6 +214,64 @@ export interface IUserService {
 }
 
 // ============================================================================
+// SCHEDULE SERVICE (Date-Specific Workout Planning)
+// ============================================================================
+
+export interface IScheduleService {
+  /**
+   * Get scheduled workouts for a date range
+   * Returns what was PLANNED for each date
+   */
+  getScheduledWorkouts(
+    userId: string,
+    startDate: Date,
+    endDate: Date
+  ): Promise<ScheduledWorkout[]>;
+
+  /**
+   * Get scheduled workout for a specific date
+   */
+  getScheduledWorkout(userId: string, date: Date): Promise<ScheduledWorkout | null>;
+
+  /**
+   * Schedule a workout on a specific date
+   * Creates a snapshot of the workout so changes to template don't affect past schedules
+   */
+  scheduleWorkout(
+    userId: string,
+    date: Date,
+    workoutPlanId: string | null,
+    workoutSnapshot: WorkoutDaySnapshot
+  ): Promise<ScheduledWorkout>;
+
+  /**
+   * Update scheduled workout status
+   */
+  updateScheduleStatus(
+    scheduleId: string,
+    status: ScheduleStatus,
+    sessionId?: string
+  ): Promise<ScheduledWorkout>;
+
+  /**
+   * Delete a scheduled workout
+   */
+  deleteScheduledWorkout(scheduleId: string): Promise<void>;
+
+  /**
+   * Get training days history for a specific week
+   * Returns what training days were active during that week
+   */
+  getTrainingDaysForWeek(userId: string, weekStart: Date): Promise<string[]>;
+
+  /**
+   * Save training days snapshot for current week
+   * Called when user changes their training days to preserve history
+   */
+  saveTrainingDaysSnapshot(userId: string, trainingDays: string[]): Promise<void>;
+}
+
+// ============================================================================
 // MAIN SERVICE INTERFACE
 // ============================================================================
 
@@ -223,4 +285,5 @@ export interface IDataService {
   history: IHistoryService;
   progress: IProgressService;
   user: IUserService;
+  schedule: IScheduleService;
 }
