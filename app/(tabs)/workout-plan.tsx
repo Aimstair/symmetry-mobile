@@ -7,6 +7,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { ActiveDayModal } from '@/components/ui/workout/ActiveDayModal';
 import { SwapExerciseModal } from '@/components/ui/workout/SwapExerciseModal';
+import { AddExerciseModal } from '@/components/ui/workout/AddExerciseModal';
 import {
   ChevronLeft,
   ChevronRight,
@@ -36,7 +37,7 @@ import {
   normalizeDayName,
 } from '@/utils/workoutCalendar';
 import { generateSingleDayWorkout } from '@/utils/aiPlanner';
-import type { WorkoutDay } from '@/types';
+import type { WorkoutDay, PlanExercise } from '@/types';
 
 export default function WorkoutPlanScreen() {
   const router = useRouter();
@@ -51,6 +52,7 @@ export default function WorkoutPlanScreen() {
   const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
   const syncAddWorkoutDayToCloud = useAppStore((s) => s.syncAddWorkoutDayToCloud);
   const syncRemoveWorkoutDayFromCloud = useAppStore((s) => s.syncRemoveWorkoutDayFromCloud);
+  const syncAddExerciseToDayCloud = useAppStore((s) => s.syncAddExerciseToDayCloud);
   const startWorkout = useAppStore((s) => s.startWorkout);
 
   // Get user's training days (from onboarding)
@@ -95,6 +97,9 @@ export default function WorkoutPlanScreen() {
   // Active Day Modal state
   const [showActiveDayModal, setShowActiveDayModal] = useState(false);
   const [pendingActiveDayName, setPendingActiveDayName] = useState<string>('');
+  
+  // Add Exercise Modal state
+  const [showAddExerciseModal, setShowAddExerciseModal] = useState(false);
 
   // Animation refs
   const headerAnim = useRef(new Animated.Value(0)).current;
@@ -450,8 +455,9 @@ export default function WorkoutPlanScreen() {
                         className="w-full bg-primary" 
                         onPress={() => {
                           // Set active workout state before navigating
-                          if (selectedWorkout.workoutDay?.id) {
-                            startWorkout(selectedWorkout.workoutDay.id);
+                          // Pass the PLAN ID, not the day ID
+                          if (activePlan?.id) {
+                            startWorkout(activePlan.id);
                           }
                           router.push('/active-workout');
                         }}
@@ -569,6 +575,19 @@ export default function WorkoutPlanScreen() {
                       </View>
                     );
                   })}
+                  
+                  {/* Add Exercise Button */}
+                  {selectedWorkout.status !== 'completed' && selectedWorkout.workoutDay && (
+                    <Pressable
+                      onPress={() => setShowAddExerciseModal(true)}
+                      className="p-3 rounded-lg border border-dashed border-primary/50 bg-primary/5 items-center justify-center"
+                    >
+                      <View className="flex-row items-center gap-2">
+                        <Plus size={18} color="#31D5E3" />
+                        <Text className="text-primary font-medium">Add Exercise</Text>
+                      </View>
+                    </Pressable>
+                  )}
                 </View>
               </>
             )}
@@ -600,6 +619,35 @@ export default function WorkoutPlanScreen() {
         onOpenChange={setShowActiveDayModal}
         dayName={pendingActiveDayName}
         onConfirm={handleConfirmActiveDay}
+      />
+
+      {/* Add Exercise Modal */}
+      <AddExerciseModal
+        open={showAddExerciseModal}
+        onOpenChange={setShowAddExerciseModal}
+        excludeExerciseIds={selectedWorkout?.workoutDay?.exercises.map(e => e.exerciseId) || []}
+        onAddExercise={async (exerciseData) => {
+          if (!activePlan || !selectedWorkout?.workoutDay) return;
+          
+          // Generate a unique ID for the new exercise
+          const newExercise: PlanExercise = {
+            ...exerciseData,
+            id: `ex-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            workoutDayId: selectedWorkout.workoutDay.id,
+            orderIndex: selectedWorkout.workoutDay.exercises.length,
+          };
+          
+          try {
+            await syncAddExerciseToDayCloud(
+              activePlan.id,
+              selectedWorkout.workoutDay.id,
+              newExercise
+            );
+          } catch (error) {
+            console.error('Failed to add exercise:', error);
+            Alert.alert('Error', 'Failed to add exercise. Please try again.');
+          }
+        }}
       />
     </SafeAreaView>
   );

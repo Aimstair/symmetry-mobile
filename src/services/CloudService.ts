@@ -1251,7 +1251,7 @@ class CloudUserService implements IUserService {
     }
     
     try {
-      // Use maybeSingle() instead of single() to avoid hanging on timeout
+      // First, try to find user by ID (normal case)
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -1274,42 +1274,169 @@ class CloudUserService implements IUserService {
         throw new Error(`Failed to fetch user: ${error.message}`);
       }
 
-      if (!data) {
+      if (data) {
+        return this.mapUserRow(data);
+      }
+
+      // User not found by ID - try email fallback
+      // This handles the case where public.users.id doesn't match auth.users.id
+      if (__DEV__) {
+        console.log('☁️ User not found by ID, attempting email fallback...');
+      }
+      
+      // Get the current session to find the email
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user?.email) {
         if (__DEV__) {
-          console.log('☁️ User not found for ID:', userId);
-          // Check if there are ANY users in the table (for debugging)
-          const { data: allUsers, error: countError } = await supabase
-            .from('users')
-            .select('id, email')
-            .limit(5);
-          
-          if (!countError && allUsers) {
-            console.log('☁️ Sample users in database:', allUsers);
-          }
+          console.log('☁️ No session email available for fallback');
         }
         return null;
       }
+      
+      // Try to find user by email
+      const { data: userByEmail, error: emailError } = await supabase
+        .from('users')
+        .select('*')
+        .ilike('email', session.user.email)
+        .maybeSingle();
+      
+      if (emailError) {
+        console.error('☁️ Email fallback error:', emailError);
+        return null;
+      }
+      
+      if (userByEmail) {
+        if (__DEV__) {
+          console.log('☁️ Found user by email! Mismatched IDs:', {
+            authId: userId,
+            dbId: userByEmail.id,
+            email: userByEmail.email
+          });
+          console.log('☁️ ⚠️ CRITICAL: Run the ID fix SQL in Supabase Dashboard:');
+          console.log(`UPDATE public.users SET id = '${userId}' WHERE email = '${userByEmail.email}';`);
+        }
+        
+        // AUTO-FIX: Update the user's ID to match auth.uid()
+        // This requires the fix_user_id_mismatch RPC function from the migration
+        const { data: rpcResult, error: updateError } = await supabase.rpc('fix_user_id_mismatch', {
+          old_id: userByEmail.id,
+          new_id: userId,
+          user_email: session.user.email
+        });
+        
+        if (updateError) {
+          // RPC function doesn't exist or failed
+          // This is a critical issue - the user's data is inaccessible due to ID mismatch
+          const errorDetails = `
+=============================================================
+⚠️ CRITICAL: User ID Mismatch Detected
+=============================================================
 
-      return {
-        id: data.id,
-        name: data.name,
-        email: data.email,
-        age: data.age,
-        gender: data.gender,
-        height: data.height,
-        weight: data.weight,
-        goal: data.goal,
-        experienceLevel: data.experience_level,
-        trainingDays: data.training_days || [],
-        createdAt: new Date(data.created_at),
-        updatedAt: new Date(data.updated_at),
-      };
+Your auth session ID: ${userId}
+Database user ID: ${userByEmail.id}
+Email: ${userByEmail.email}
+
+The database RPC function to auto-fix this issue is not available.
+This usually means the migration hasn't been applied yet.
+
+TO FIX THIS, RUN THE FOLLOWING IN SUPABASE SQL EDITOR:
+
+1. First, apply the migration:
+   npx supabase db push
+
+2. If that doesn't work, run this SQL manually:
+
+-- Disable RLS temporarily
+ALTER TABLE users DISABLE ROW LEVEL SECURITY;
+
+-- Fix user ID
+UPDATE public.users SET id = '${userId}' WHERE email = '${userByEmail.email}';
+
+-- Fix related tables
+UPDATE workout_plans SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE nutrition_targets SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE equipment_profiles SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE body_measurements SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE physique_scans SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE cardio_logs SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE workout_schedule SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+UPDATE training_days_history SET user_id = '${userId}' WHERE user_id = '${userByEmail.id}';
+
+-- Re-enable RLS
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+
+=============================================================
+`;
+          console.error(errorDetails);
+          
+          // Throw an error so the UI can show a helpful message
+          throw new Error(
+            `Account sync issue detected. Please contact support or run database migration. ` +
+            `(Auth ID: ${userId.slice(0, 8)}..., DB ID: ${userByEmail.id.slice(0, 8)}...)`
+          );
+        }
+        
+        if (__DEV__) {
+          console.log('☁️ ✅ Auto-fixed user ID mismatch! Database updated.');
+        }
+        
+        // Re-fetch with correct ID
+        const { data: fixedUser } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', userId)
+          .maybeSingle();
+        
+        if (fixedUser) {
+          return this.mapUserRow(fixedUser);
+        }
+        
+        // Fallback - return user with new ID
+        return {
+          ...this.mapUserRow(userByEmail),
+          id: userId,
+        };
+      }
+      
+      if (__DEV__) {
+        console.log('☁️ No user found for ID or email:', userId, session.user.email);
+        // Check if there are ANY users in the table (for debugging)
+        const { data: allUsers, error: countError } = await supabase
+          .from('users')
+          .select('id, email')
+          .limit(5);
+        
+        if (!countError && allUsers) {
+          console.log('☁️ Sample users in database:', allUsers);
+        }
+      }
+      return null;
     } catch (error) {
       if (__DEV__) {
         console.error('☁️ CloudService.getUser error:', error);
       }
       throw error;
     }
+  }
+
+  /**
+   * Helper to map database row to User type
+   */
+  private mapUserRow(data: any): User {
+    return {
+      id: data.id,
+      name: data.name,
+      email: data.email,
+      age: data.age,
+      gender: data.gender,
+      height: data.height,
+      weight: data.weight,
+      goal: data.goal,
+      experienceLevel: data.experience_level,
+      trainingDays: data.training_days || [],
+      createdAt: new Date(data.created_at),
+      updatedAt: new Date(data.updated_at),
+    };
   }
 
   async getNutritionTargets(userId: string): Promise<NutritionTargets | null> {

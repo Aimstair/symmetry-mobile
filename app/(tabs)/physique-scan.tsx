@@ -70,9 +70,12 @@ export default function PhysiqueScan() {
   // Get user and data from store
   const user = useAppStore((s) => s.user);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
+  const workoutPlans = useAppStore((s) => s.workoutPlans);
   const syncAddPhysiqueScan = useAppStore((s) => s.syncAddPhysiqueScan);
   const syncWorkoutPlanToCloud = useAppStore((s) => s.syncWorkoutPlanToCloud);
+  const syncUpdateWorkoutPlanToCloud = useAppStore((s) => s.syncUpdateWorkoutPlanToCloud);
   const addWorkoutPlan = useAppStore((s) => s.addWorkoutPlan);
+  const updateWorkoutPlan = useAppStore((s) => s.updateWorkoutPlan);
   const isLoading = useAppStore((s) => s.isLoading);
 
   // Load progress data on focus
@@ -182,19 +185,60 @@ export default function PhysiqueScan() {
                   lackingThreshold: 70,
                 });
 
-                await syncWorkoutPlanToCloud(aiPlan);
-                addWorkoutPlan(aiPlan);
+                // Check if a workout plan already exists
+                const existingPlan = workoutPlans.length > 0 ? workoutPlans[0] : null;
+                
+                if (existingPlan) {
+                  // Update the existing plan with new workout days from the AI-generated plan
+                  // Keep the existing plan's ID and metadata, but replace the workout days
+                  const updatedPlan = {
+                    ...aiPlan,
+                    id: existingPlan.id, // Keep the same ID
+                    createdAt: existingPlan.createdAt, // Keep original creation date
+                    updatedAt: new Date(), // Update timestamp
+                  };
+                  
+                  await syncUpdateWorkoutPlanToCloud(existingPlan.id, {
+                    name: updatedPlan.name,
+                    description: updatedPlan.description,
+                    type: updatedPlan.type,
+                    daysPerWeek: updatedPlan.daysPerWeek,
+                    workoutDays: updatedPlan.workoutDays,
+                  });
+                  
+                  // Update local state
+                  updateWorkoutPlan(existingPlan.id, {
+                    name: updatedPlan.name,
+                    description: updatedPlan.description,
+                    type: updatedPlan.type,
+                    daysPerWeek: updatedPlan.daysPerWeek,
+                    workoutDays: updatedPlan.workoutDays,
+                  });
+                  
+                  console.log('✅ Existing workout plan updated from new scan:', existingPlan.id);
+                  
+                  setTimeout(() => {
+                    Alert.alert(
+                      'Workout Plan Updated!',
+                      'Your existing workout plan has been updated based on your new scan results. Check the Workout Plan tab to view changes.',
+                      [{ text: 'OK' }]
+                    );
+                  }, 1000);
+                } else {
+                  // No existing plan, create a new one
+                  await syncWorkoutPlanToCloud(aiPlan);
+                  addWorkoutPlan(aiPlan);
 
-                console.log('✅ AI workout plan generated and saved:', aiPlan.id);
+                  console.log('✅ New AI workout plan generated and saved:', aiPlan.id);
 
-                // Show success message
-                setTimeout(() => {
-                  Alert.alert(
-                    'Workout Plan Generated!',
-                    'A new workout plan has been created based on your scan results. Check the Workout Plan tab to view it.',
-                    [{ text: 'OK' }]
-                  );
-                }, 1000);
+                  setTimeout(() => {
+                    Alert.alert(
+                      'Workout Plan Generated!',
+                      'A new workout plan has been created based on your scan results. Check the Workout Plan tab to view it.',
+                      [{ text: 'OK' }]
+                    );
+                  }, 1000);
+                }
               } catch (planError) {
                 console.error('❌ Failed to generate AI plan:', planError);
                 // Still show scan results even if plan generation fails

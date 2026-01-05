@@ -8,6 +8,7 @@ import type {
   EquipmentProfile,
   WorkoutPlan,
   WorkoutDay,
+  PlanExercise,
   BodyMeasurement,
   PhysiqueScan,
   CardioLog,
@@ -63,6 +64,8 @@ interface AppState {
   updateWorkoutPlan: (id: string, updates: Partial<WorkoutPlan>) => void;
   deleteWorkoutPlan: (id: string) => void;
   swapExercise: (planId: string, dayId: string, exerciseId: string, newExerciseId: string) => void;
+  addExerciseToDay: (planId: string, dayId: string, exercise: PlanExercise) => void;
+  removeExerciseFromDay: (planId: string, dayId: string, exerciseId: string) => void;
   addWorkoutDay: (planId: string, workoutDay: WorkoutDay) => void;
   removeWorkoutDay: (planId: string, dayId: string) => void;
   startWorkout: (workoutId: string) => void;
@@ -103,6 +106,8 @@ interface AppState {
   syncUpdateWorkoutPlanToCloud: (id: string, updates: Partial<WorkoutPlan>) => Promise<WorkoutPlan>;
   syncDeleteWorkoutPlanFromCloud: (id: string) => Promise<void>;
   syncSwapExerciseToCloud: (planId: string, dayId: string, exerciseId: string, newExerciseId: string) => Promise<void>;
+  syncAddExerciseToDayCloud: (planId: string, dayId: string, exercise: PlanExercise) => Promise<void>;
+  syncRemoveExerciseFromDayCloud: (planId: string, dayId: string, exerciseId: string) => Promise<void>;
   syncAddWorkoutDayToCloud: (planId: string, workoutDay: WorkoutDay) => Promise<WorkoutDay>;
   syncRemoveWorkoutDayFromCloud: (planId: string, dayId: string) => Promise<void>;
   syncUserToCloud: (user: User) => Promise<User>;
@@ -217,6 +222,50 @@ export const useAppStore = create<AppState>()(
             };
           }),
         })),
+      
+      addExerciseToDay: (planId, dayId, exercise) =>
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((plan) => {
+            if (plan.id !== planId) return plan;
+            return {
+              ...plan,
+              workoutDays: plan.workoutDays.map((day) => {
+                if (day.id !== dayId) return day;
+                // Add the exercise at the end with proper order index
+                const newOrderIndex = day.exercises.length;
+                return {
+                  ...day,
+                  exercises: [
+                    ...day.exercises,
+                    { ...exercise, orderIndex: newOrderIndex },
+                  ],
+                };
+              }),
+            };
+          }),
+        })),
+      
+      removeExerciseFromDay: (planId, dayId, exerciseId) =>
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((plan) => {
+            if (plan.id !== planId) return plan;
+            return {
+              ...plan,
+              workoutDays: plan.workoutDays.map((day) => {
+                if (day.id !== dayId) return day;
+                // Remove the exercise and reindex remaining exercises
+                const updatedExercises = day.exercises
+                  .filter((ex) => ex.id !== exerciseId)
+                  .map((ex, idx) => ({ ...ex, orderIndex: idx }));
+                return {
+                  ...day,
+                  exercises: updatedExercises,
+                };
+              }),
+            };
+          }),
+        })),
+      
       addWorkoutDay: (planId, workoutDay) =>
         set((state) => ({
           workoutPlans: state.workoutPlans.map((plan) => {
@@ -472,6 +521,48 @@ export const useAppStore = create<AppState>()(
         } catch (error) {
           set({ isLoading: false, loadingMessage: null });
           console.error('❌ Failed to swap exercise:', error);
+          throw error;
+        }
+      },
+
+      syncAddExerciseToDayCloud: async (planId, dayId, exercise) => {
+        set({ isLoading: true, loadingMessage: 'Adding exercise...' });
+        try {
+          // Update local state first
+          get().addExerciseToDay(planId, dayId, exercise);
+          
+          // Get the updated plan and sync to cloud
+          const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
+          if (updatedPlan) {
+            await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
+          }
+          
+          set({ isLoading: false, loadingMessage: null });
+          if (__DEV__) console.log('✅ Exercise added:', exercise.exerciseId);
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to add exercise:', error);
+          throw error;
+        }
+      },
+
+      syncRemoveExerciseFromDayCloud: async (planId, dayId, exerciseId) => {
+        set({ isLoading: true, loadingMessage: 'Removing exercise...' });
+        try {
+          // Update local state first
+          get().removeExerciseFromDay(planId, dayId, exerciseId);
+          
+          // Get the updated plan and sync to cloud
+          const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
+          if (updatedPlan) {
+            await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
+          }
+          
+          set({ isLoading: false, loadingMessage: null });
+          if (__DEV__) console.log('✅ Exercise removed:', exerciseId);
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to remove exercise:', error);
           throw error;
         }
       },

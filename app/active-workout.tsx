@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput, Alert } from 'react-native';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { View, Text, ScrollView, Pressable, TextInput, Alert, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle } from 'react-native-svg';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from '@/components/ui/modal';
 import { ExerciseDetailSheet } from '@/components/ui/workout/ExerciseDetailSheet';
+import { AddExerciseModal } from '@/components/ui/workout/AddExerciseModal';
 import { 
   ChevronLeft, 
   Timer, 
@@ -28,9 +29,139 @@ import {
   Dumbbell,
   ChevronRight,
   Trophy,
+  Trash2,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
-import type { PlanExercise, WorkoutDay } from '@/types';
+import type { PlanExercise, WorkoutDay, CatalogExercise } from '@/types';
+
+// Isolated timer component to prevent full-screen re-renders
+const ElapsedTimer = ({ startTime }: { startTime: Date | null }) => {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (!startTime) return;
+
+    const interval = setInterval(() => {
+      const start = startTime.getTime();
+      const now = Date.now();
+      setElapsed(Math.floor((now - start) / 1000));
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [startTime]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <View className="flex-row items-center gap-2">
+      <Timer size={16} color="#31D5E3" />
+      <Text className="font-mono font-bold text-lg text-foreground">{formatTime(elapsed)}</Text>
+    </View>
+  );
+};
+
+// Isolated rest timer component
+const RestTimerDisplay = ({ 
+  restTimer, 
+  onStop, 
+  onUpdate 
+}: { 
+  restTimer: { isRunning: boolean; elapsedSeconds: number; targetSeconds: number };
+  onStop: () => void;
+  onUpdate: (elapsed: number) => void;
+}) => {
+  useEffect(() => {
+    if (!restTimer.isRunning) return;
+
+    const interval = setInterval(() => {
+      const newElapsed = restTimer.elapsedSeconds + 1;
+      if (newElapsed >= restTimer.targetSeconds) {
+        onStop();
+      } else {
+        onUpdate(newElapsed);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [restTimer.isRunning, restTimer.elapsedSeconds, restTimer.targetSeconds, onStop, onUpdate]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const circumference = 2 * Math.PI * 88;
+  const progress = restTimer.targetSeconds > 0 
+    ? restTimer.elapsedSeconds / restTimer.targetSeconds 
+    : 0;
+  const strokeDashoffset = circumference * (1 - progress);
+
+  if (!restTimer.isRunning) return null;
+
+  return (
+    <View className="absolute inset-0 z-50 bg-background/95 items-center justify-center">
+      <View className="items-center">
+        <Text className="text-sm text-muted-foreground mb-4 uppercase tracking-wide">Rest Timer</Text>
+        
+        <View className="relative w-48 h-48 mb-8 items-center justify-center">
+          <Svg width={192} height={192} style={{ transform: [{ rotate: '-90deg' }] }}>
+            <Circle
+              cx="96"
+              cy="96"
+              r="88"
+              fill="none"
+              stroke="#27272A"
+              strokeWidth="8"
+            />
+            <Circle
+              cx="96"
+              cy="96"
+              r="88"
+              fill="none"
+              stroke="#31D5E3"
+              strokeWidth="8"
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={strokeDashoffset}
+            />
+          </Svg>
+          <View className="absolute inset-0 items-center justify-center">
+            <Text className="text-5xl font-bold font-mono text-foreground">
+              {formatTime(restTimer.elapsedSeconds)}
+            </Text>
+            <Text className="text-sm text-muted-foreground mt-1">
+              / {formatTime(restTimer.targetSeconds)}
+            </Text>
+          </View>
+        </View>
+
+        <View className="flex-row gap-4">
+          <Button
+            variant="outline"
+            size="lg"
+            onPress={onStop}
+            className="min-w-[128px]"
+          >
+            <SkipForward size={16} color="#A1A1AA" />
+            <Text className="text-foreground ml-2">Skip</Text>
+          </Button>
+          <Button
+            size="lg"
+            onPress={onStop}
+            className="min-w-[128px] bg-primary"
+          >
+            <Text className="text-primary-foreground font-semibold">I'm Ready</Text>
+          </Button>
+        </View>
+      </View>
+    </View>
+  );
+};
 
 // Extended set data for tracking during workout
 interface SetData {
@@ -106,10 +237,10 @@ export default function ActiveWorkout() {
     stopRestTimer,
     setCurrentExercise,
     syncSwapExerciseToCloud,
+    syncAddExerciseToDayCloud,
   } = useAppStore();
 
   // Local state
-  const [elapsedTime, setElapsedTime] = useState(0);
   const [exercises, setExercises] = useState<ExerciseData[]>([]);
   const [showPlateCalc, setShowPlateCalc] = useState(false);
   const [calcWeight, setCalcWeight] = useState('');
@@ -120,6 +251,10 @@ export default function ActiveWorkout() {
   const [historyExerciseId, setHistoryExerciseId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [showCompletionModal, setShowCompletionModal] = useState(false);
+  const [showAddExerciseModal, setShowAddExerciseModal] = useState(false);
+  
+  // Animation refs for smooth entrance
+  const exerciseAnimations = useRef<Map<string, Animated.Value>>(new Map());
 
   // Resolve current workout plan and day
   const { currentPlan, currentDay, loadError } = useMemo(() => {
@@ -186,43 +321,26 @@ export default function ActiveWorkout() {
   // Initialize exercises from current day
   useEffect(() => {
     if (currentDay?.exercises && currentDay.exercises.length > 0) {
-      setExercises(convertToSessionExercises(currentDay.exercises));
+      const sessionExercises = convertToSessionExercises(currentDay.exercises);
+      setExercises(sessionExercises);
+      
+      // Animate exercises entrance
+      sessionExercises.forEach((ex, index) => {
+        if (!exerciseAnimations.current.has(ex.id)) {
+          exerciseAnimations.current.set(ex.id, new Animated.Value(0));
+        }
+        const anim = exerciseAnimations.current.get(ex.id)!;
+        
+        Animated.spring(anim, {
+          toValue: 1,
+          delay: index * 80,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }).start();
+      });
     }
   }, [currentDay]);
-
-  // Calculate elapsed time from startTime
-  useEffect(() => {
-    if (!activeWorkout.startTime) return;
-
-    const interval = setInterval(() => {
-      const start = new Date(activeWorkout.startTime!).getTime();
-      const now = Date.now();
-      setElapsedTime(Math.floor((now - start) / 1000));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [activeWorkout.startTime]);
-
-  // Rest timer effect - connected to store
-  useEffect(() => {
-    if (!activeWorkout.restTimer.isRunning) return;
-
-    const interval = setInterval(() => {
-      const newElapsed = activeWorkout.restTimer.elapsedSeconds + 1;
-      if (newElapsed >= activeWorkout.restTimer.targetSeconds) {
-        stopRestTimer();
-      } else {
-        updateRestTimer(newElapsed);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [activeWorkout.restTimer.isRunning, activeWorkout.restTimer.elapsedSeconds, stopRestTimer, updateRestTimer]);
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
 
   // Calculate workout stats
   const workoutStats = useMemo(() => {
@@ -256,6 +374,54 @@ export default function ActiveWorkout() {
           },
         },
       ]
+    );
+  };
+
+  // Handle adding a new set to an exercise
+  const handleAddSet = (exerciseId: string) => {
+    setExercises((prev) =>
+      prev.map((ex) => {
+        if (ex.id !== exerciseId) return ex;
+        
+        const newSetId = ex.sets.length + 1;
+        const lastSet = ex.sets[ex.sets.length - 1];
+        
+        return {
+          ...ex,
+          sets: [
+            ...ex.sets,
+            {
+              id: newSetId,
+              weight: lastSet?.weight || '',
+              reps: lastSet?.reps || '',
+              completed: false,
+              isWarmup: false,
+              tags: [],
+              prevWeight: lastSet?.prevWeight,
+              prevReps: lastSet?.prevReps,
+            },
+          ],
+        };
+      })
+    );
+  };
+
+  // Handle removing a set from an exercise (minimum 1 set)
+  const handleRemoveSet = (exerciseId: string, setId: number) => {
+    setExercises((prev) =>
+      prev.map((ex) => {
+        if (ex.id !== exerciseId || ex.sets.length <= 1) return ex;
+        
+        // Remove the set and reindex remaining sets
+        const newSets = ex.sets
+          .filter((set) => set.id !== setId)
+          .map((set, index) => ({ ...set, id: index + 1 }));
+        
+        return {
+          ...ex,
+          sets: newSets,
+        };
+      })
     );
   };
 
@@ -459,10 +625,7 @@ export default function ActiveWorkout() {
             <ChevronLeft size={20} color="#A1A1AA" />
           </Pressable>
           
-          <View className="flex-row items-center gap-2">
-            <Timer size={16} color="#31D5E3" />
-            <Text className="font-mono font-bold text-lg text-foreground">{formatTime(elapsedTime)}</Text>
-          </View>
+          <ElapsedTimer startTime={activeWorkout.startTime} />
 
           <Pressable
             onPress={() => setShowMenu(!showMenu)}
@@ -518,8 +681,30 @@ export default function ActiveWorkout() {
               const isSuperset = exercise.supersetId;
               const supersetNext = exercises[exIndex + 1]?.supersetId === exercise.supersetId;
             
+              const animValue = exerciseAnimations.current.get(exercise.id) || new Animated.Value(1);
+              
               return (
-                <View key={exercise.id} className="relative">
+                <Animated.View 
+                  key={exercise.id} 
+                  className="relative"
+                  style={{
+                    opacity: animValue,
+                    transform: [
+                      {
+                        translateY: animValue.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [20, 0],
+                        }),
+                      },
+                      {
+                        scale: animValue.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0.95, 1],
+                        }),
+                      },
+                    ],
+                  }}
+                >
                   {isSuperset && supersetNext && (
                     <View className="absolute left-4 top-full w-0.5 h-4 bg-primary z-10" />
                 )}
@@ -551,10 +736,11 @@ export default function ActiveWorkout() {
                   {/* Sets Table Header */}
                   <View className="flex-row px-4 py-2 bg-muted/30 border-b border-border/30">
                     <Text className="w-[12%] text-xs text-muted-foreground font-medium">SET</Text>
-                    <Text className="w-[28%] text-xs text-muted-foreground font-medium">PREV</Text>
-                    <Text className="w-[20%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
-                    <Text className="w-[20%] text-xs text-muted-foreground font-medium">REPS</Text>
-                    <Text className="w-[20%] text-xs text-muted-foreground font-medium text-center">✓</Text>
+                    <Text className="w-[25%] text-xs text-muted-foreground font-medium">PREV</Text>
+                    <Text className="w-[18%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
+                    <Text className="w-[18%] text-xs text-muted-foreground font-medium">REPS</Text>
+                    <Text className="w-[15%] text-xs text-muted-foreground font-medium text-center">✓</Text>
+                    <Text className="w-[12%] text-xs text-muted-foreground font-medium text-center"></Text>
                   </View>
 
                   {/* Warmup sets */}
@@ -602,10 +788,10 @@ export default function ActiveWorkout() {
                       )}
                     >
                       <Text className="w-[12%] text-sm font-medium text-foreground">{set.id}</Text>
-                      <Text className="w-[28%] text-xs text-muted-foreground">
+                      <Text className="w-[25%] text-xs text-muted-foreground">
                         {set.prevWeight ? `${set.prevWeight} × ${set.prevReps}` : '—'}
                       </Text>
-                      <View className="w-[20%]">
+                      <View className="w-[18%]">
                         <TextInput
                           keyboardType="numeric"
                           value={set.weight}
@@ -617,17 +803,19 @@ export default function ActiveWorkout() {
                           style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                         />
                       </View>
-                      <View className="w-[20%]">
+                      <View className="w-[18%]">
                         <TextInput
                           keyboardType="numeric"
                           value={set.reps}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'reps', text)}
                           className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
-                          placeholder={String(set.prevReps)}
+                          placeholder={set.prevReps ? String(set.prevReps) : '—'}
                           placeholderTextColor="#71717A"
+                          textAlignVertical="center"
+                          style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                         />
                       </View>
-                      <View className="w-[20%] items-center">
+                      <View className="w-[15%] items-center">
                         <Pressable
                           onPress={() => handleSetComplete(exercise.id, set.id)}
                           className={cn(
@@ -639,11 +827,23 @@ export default function ActiveWorkout() {
                           <Check size={16} color={set.completed ? '#FFFFFF' : '#A1A1AA'} />
                         </Pressable>
                       </View>
+                      <View className="w-[12%] items-center">
+                        {exercise.sets.length > 1 && (
+                          <Pressable
+                            onPress={() => handleRemoveSet(exercise.id, set.id)}
+                            className="h-8 w-8 rounded items-center justify-center"
+                            style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+                          >
+                            <Trash2 size={14} color="#EF4444" />
+                          </Pressable>
+                        )}
+                      </View>
                     </View>
                   ))}
 
                   {/* Add Set */}
                   <Pressable 
+                    onPress={() => handleAddSet(exercise.id)}
                     className="py-3 items-center justify-center flex-row gap-2"
                     style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
                   >
@@ -651,9 +851,22 @@ export default function ActiveWorkout() {
                     <Text className="text-sm text-primary">Add Set</Text>
                   </Pressable>
                 </GlassCard>
-              </View>
+              </Animated.View>
             );
           })
+        )}
+        
+        {/* Add Exercise Button during active workout */}
+        {exercises.length > 0 && (
+          <Pressable
+            onPress={() => setShowAddExerciseModal(true)}
+            className="p-4 rounded-lg border border-dashed border-primary/50 bg-primary/5 items-center justify-center"
+          >
+            <View className="flex-row items-center gap-2">
+              <Plus size={18} color="#31D5E3" />
+              <Text className="text-primary font-medium">Add Exercise</Text>
+            </View>
+          </Pressable>
         )}
         </View>
       </ScrollView>
@@ -670,64 +883,11 @@ export default function ActiveWorkout() {
       </View>
 
       {/* Rest Timer Modal */}
-      {activeWorkout.restTimer.isRunning && (
-        <View className="absolute inset-0 z-50 bg-background/95 items-center justify-center">
-          <View className="items-center">
-            <Text className="text-sm text-muted-foreground mb-4 uppercase tracking-wide">Rest Timer</Text>
-            
-            <View className="relative w-48 h-48 mb-8 items-center justify-center">
-              <Svg width={192} height={192} style={{ transform: [{ rotate: '-90deg' }] }}>
-                <Circle
-                  cx="96"
-                  cy="96"
-                  r="88"
-                  fill="none"
-                  stroke="#27272A"
-                  strokeWidth="8"
-                />
-                <Circle
-                  cx="96"
-                  cy="96"
-                  r="88"
-                  fill="none"
-                  stroke="#31D5E3"
-                  strokeWidth="8"
-                  strokeLinecap="round"
-                  strokeDasharray={circumference}
-                  strokeDashoffset={strokeDashoffset}
-                />
-              </Svg>
-              <View className="absolute inset-0 items-center justify-center">
-                <Text className="text-5xl font-bold font-mono text-foreground">
-                  {formatTime(activeWorkout.restTimer.elapsedSeconds)}
-                </Text>
-                <Text className="text-sm text-muted-foreground mt-1">
-                  / {formatTime(activeWorkout.restTimer.targetSeconds)}
-                </Text>
-              </View>
-            </View>
-
-            <View className="flex-row gap-4">
-              <Button
-                variant="outline"
-                size="lg"
-                onPress={stopRestTimer}
-                className="min-w-[128px]"
-              >
-                <SkipForward size={16} color="#A1A1AA" />
-                <Text className="text-foreground ml-2">Skip</Text>
-              </Button>
-              <Button
-                size="lg"
-                onPress={stopRestTimer}
-                className="min-w-[128px] bg-primary"
-              >
-                <Text className="text-primary-foreground font-semibold">I'm Ready</Text>
-              </Button>
-            </View>
-          </View>
-        </View>
-      )}
+      <RestTimerDisplay 
+        restTimer={activeWorkout.restTimer}
+        onStop={stopRestTimer}
+        onUpdate={updateRestTimer}
+      />
 
       {/* Settings Menu Modal */}
       <Dialog open={showMenu} onOpenChange={setShowMenu}>
@@ -841,7 +1001,7 @@ export default function ActiveWorkout() {
         onInputChange={handleInputChange}
         onSwapExercise={handleSwapExercise}
         onViewHistory={handleViewHistory}
-        elapsedTime={elapsedTime}
+        onRemoveSet={handleRemoveSet}
         unit={unit}
         deloadMode={activeWorkout.deloadMode}
       />
@@ -863,10 +1023,6 @@ export default function ActiveWorkout() {
           
           <View className="gap-4 py-4 items-center">
             <View className="flex-row gap-6">
-              <View className="items-center">
-                <Text className="text-3xl font-bold text-primary">{formatTime(elapsedTime)}</Text>
-                <Text className="text-xs text-muted-foreground">Duration</Text>
-              </View>
               <View className="items-center">
                 <Text className="text-3xl font-bold text-success">{workoutStats.completedSets}</Text>
                 <Text className="text-xs text-muted-foreground">Sets</Text>
@@ -893,6 +1049,57 @@ export default function ActiveWorkout() {
           </View>
         </DialogContent>
       </Dialog>
+
+      {/* Add Exercise Modal */}
+      <AddExerciseModal
+        open={showAddExerciseModal}
+        onOpenChange={setShowAddExerciseModal}
+        excludeExerciseIds={exercises.map(e => e.id)}
+        onAddExercise={async (exerciseData) => {
+          if (!currentPlan || !currentDay) return;
+          
+          // Generate a unique ID for the new exercise
+          const newExercise: PlanExercise = {
+            ...exerciseData,
+            id: `ex-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            workoutDayId: currentDay.id,
+            orderIndex: currentDay.exercises.length,
+          };
+          
+          try {
+            // Add to cloud/store
+            await syncAddExerciseToDayCloud(
+              currentPlan.id,
+              currentDay.id,
+              newExercise
+            );
+            
+            // Also add to local exercises state for immediate UI update
+            const newExerciseData: ExerciseData = {
+              id: newExercise.id,
+              name: exerciseData.exercise?.name || exerciseData.exerciseId,
+              muscleGroup: exerciseData.exercise?.muscleGroups[0] || '',
+              equipment: exerciseData.exercise?.equipment?.[0] || '',
+              targetSets: exerciseData.targetSets,
+              targetReps: exerciseData.targetReps,
+              restSeconds: exerciseData.restSeconds,
+              sets: Array.from({ length: exerciseData.targetSets }, (_, i) => ({
+                id: i + 1,
+                weight: '',
+                reps: '',
+                completed: false,
+                isWarmup: false,
+                tags: [],
+              })),
+            };
+            
+            setExercises(prev => [...prev, newExerciseData]);
+          } catch (error) {
+            console.error('Failed to add exercise:', error);
+            Alert.alert('Error', 'Failed to add exercise. Please try again.');
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }

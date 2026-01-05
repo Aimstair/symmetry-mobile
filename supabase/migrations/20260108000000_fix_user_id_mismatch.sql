@@ -65,3 +65,75 @@ CREATE TRIGGER ensure_user_id_matches_auth
   FOR EACH ROW
   EXECUTE FUNCTION validate_user_id();
 
+-- ============================================================================
+-- RPC FUNCTION: Auto-fix user ID mismatch (called from app)
+-- This allows the app to fix mismatched IDs when detected
+-- Uses SECURITY DEFINER to bypass RLS for the fix operation
+-- ============================================================================
+CREATE OR REPLACE FUNCTION fix_user_id_mismatch(
+  old_id UUID,
+  new_id UUID,
+  user_email TEXT
+)
+RETURNS VOID AS $$
+DECLARE
+  v_auth_id UUID;
+  v_user_exists BOOLEAN;
+BEGIN
+  -- Get the current authenticated user's ID
+  v_auth_id := auth.uid();
+  
+  -- Verify the new_id matches the authenticated user
+  IF v_auth_id IS NULL THEN
+    RAISE EXCEPTION 'No authenticated user session';
+  END IF;
+  
+  IF v_auth_id != new_id THEN
+    RAISE EXCEPTION 'New ID (%) must match authenticated user ID (%)', new_id, v_auth_id;
+  END IF;
+  
+  -- Check if user with old_id and matching email exists
+  -- This SELECT bypasses RLS because of SECURITY DEFINER
+  SELECT EXISTS (
+    SELECT 1 FROM public.users 
+    WHERE id = old_id AND LOWER(email) = LOWER(user_email)
+  ) INTO v_user_exists;
+  
+  IF NOT v_user_exists THEN
+    RAISE EXCEPTION 'User with old ID (%) and email (%) not found', old_id, user_email;
+  END IF;
+  
+  -- Temporarily disable the trigger that would block ID update
+  ALTER TABLE public.users DISABLE TRIGGER ensure_user_id_matches_auth;
+  
+  -- Update the user's ID in the main users table
+  UPDATE public.users 
+  SET id = new_id, updated_at = NOW() 
+  WHERE id = old_id AND LOWER(email) = LOWER(user_email);
+  
+  -- Re-enable the trigger
+  ALTER TABLE public.users ENABLE TRIGGER ensure_user_id_matches_auth;
+  
+  -- Update all related tables' foreign key references
+  UPDATE public.nutrition_targets SET user_id = new_id WHERE user_id = old_id;
+  UPDATE public.equipment_profiles SET user_id = new_id WHERE user_id = old_id;
+  UPDATE public.workout_plans SET user_id = new_id WHERE user_id = old_id;
+  UPDATE public.body_measurements SET user_id = new_id WHERE user_id = old_id;
+  UPDATE public.physique_scans SET user_id = new_id WHERE user_id = old_id;
+  UPDATE public.cardio_logs SET user_id = new_id WHERE user_id = old_id;
+  
+  -- Also update schedule tables if they exist
+  IF EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'workout_schedule') THEN
+    UPDATE public.workout_schedule SET user_id = new_id WHERE user_id = old_id;
+  END IF;
+  
+  IF EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'training_days_history') THEN
+    UPDATE public.training_days_history SET user_id = new_id WHERE user_id = old_id;
+  END IF;
+  
+  -- Log success (optional, for debugging)
+  RAISE NOTICE 'Successfully updated user ID from % to % for %', old_id, new_id, user_email;
+  
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, auth;

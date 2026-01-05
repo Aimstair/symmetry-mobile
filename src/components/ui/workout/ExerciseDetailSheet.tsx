@@ -13,6 +13,7 @@ import {
   Target,
   AlertCircle,
   X,
+  Trash2,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { dataService } from '@/services/dataServiceProvider';
@@ -48,7 +49,7 @@ interface ExerciseDetailSheetProps {
   onInputChange: (exerciseId: string, setId: number, field: 'weight' | 'reps', value: string) => void;
   onSwapExercise: (exerciseId: string, newExerciseId: string, newName: string) => void;
   onViewHistory: (exerciseId: string) => void;
-  elapsedTime: number;
+  onRemoveSet?: (exerciseId: string, setId: number) => void;
   unit: 'kg' | 'lbs';
   deloadMode: boolean;
 }
@@ -61,7 +62,7 @@ export function ExerciseDetailSheet({
   onInputChange,
   onSwapExercise,
   onViewHistory,
-  elapsedTime,
+  onRemoveSet,
   unit,
   deloadMode,
 }: ExerciseDetailSheetProps) {
@@ -154,10 +155,6 @@ export function ExerciseDetailSheet({
               <View className="flex-1">
                 <Text className="text-lg font-bold text-foreground">{exercise.name}</Text>
               </View>
-              <View className="flex-row items-center gap-2 mr-2">
-                <Timer size={16} color="#31D5E3" />
-                <Text className="font-mono font-bold text-foreground">{formatTime(elapsedTime)}</Text>
-              </View>
               <Pressable onPress={onClose} className="p-2">
                 <X size={20} color="#A1A1AA" />
               </Pressable>
@@ -232,10 +229,11 @@ export function ExerciseDetailSheet({
                 {/* Table Header */}
                 <View className="flex-row px-4 py-2 bg-muted/30 border-b border-border/30">
                   <Text className="w-[12%] text-xs text-muted-foreground font-medium">SET</Text>
-                  <Text className="w-[28%] text-xs text-muted-foreground font-medium">PREV</Text>
-                  <Text className="w-[20%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
-                  <Text className="w-[20%] text-xs text-muted-foreground font-medium">REPS</Text>
-                  <Text className="w-[20%] text-xs text-muted-foreground font-medium text-center">✓</Text>
+                  <Text className="w-[25%] text-xs text-muted-foreground font-medium">PREV</Text>
+                  <Text className="w-[18%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
+                  <Text className="w-[18%] text-xs text-muted-foreground font-medium">REPS</Text>
+                  <Text className="w-[15%] text-xs text-muted-foreground font-medium text-center">✓</Text>
+                  <Text className="w-[12%] text-xs text-muted-foreground font-medium text-center"></Text>
                 </View>
 
                 {exercise.sets.map((set) => (
@@ -247,34 +245,34 @@ export function ExerciseDetailSheet({
                     )}
                   >
                     <Text className="w-[12%] text-sm font-medium text-foreground">{set.id}</Text>
-                    <Text className="w-[28%] text-xs text-muted-foreground">
+                    <Text className="w-[25%] text-xs text-muted-foreground">
                       {set.prevWeight} × {set.prevReps}
                     </Text>
-                    <View className="w-[20%]">
+                    <View className="w-[18%]">
                       <TextInput
                         keyboardType="numeric"
                         value={set.weight}
                         onChangeText={(text) => onInputChange(exercise.id, set.id, 'weight', text)}
                         className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
-                        placeholder={String(deloadMode ? Math.round((set.prevWeight || 0) * 0.6) : set.prevWeight)}
+                        placeholder={set.prevWeight ? String(deloadMode ? Math.round(set.prevWeight * 0.6) : set.prevWeight) : '—'}
                         placeholderTextColor="#71717A"
                         textAlignVertical="center"
                         style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                       />
                     </View>
-                    <View className="w-[20%]">
+                    <View className="w-[18%]">
                       <TextInput
                         keyboardType="numeric"
                         value={set.reps}
                         onChangeText={(text) => onInputChange(exercise.id, set.id, 'reps', text)}
                         className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
-                        placeholder={String(set.prevReps)}
+                        placeholder={set.prevReps ? String(set.prevReps) : '—'}
                         placeholderTextColor="#71717A"
                         textAlignVertical="center"
                         style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
                       />
                     </View>
-                    <View className="w-[20%] items-center">
+                    <View className="w-[15%] items-center">
                       <Pressable
                         onPress={() => onSetComplete(exercise.id, set.id)}
                         className={cn(
@@ -285,6 +283,17 @@ export function ExerciseDetailSheet({
                       >
                         <Check size={16} color={set.completed ? '#FFFFFF' : '#A1A1AA'} />
                       </Pressable>
+                    </View>
+                    <View className="w-[12%] items-center">
+                      {exercise.sets.length > 1 && onRemoveSet && (
+                        <Pressable
+                          onPress={() => onRemoveSet(exercise.id, set.id)}
+                          className="h-8 w-8 rounded items-center justify-center"
+                          style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+                        >
+                          <Trash2 size={14} color="#EF4444" />
+                        </Pressable>
+                      )}
                     </View>
                   </View>
                 ))}
