@@ -244,7 +244,10 @@ export function ExerciseDetailSheet({
                       set.completed && 'bg-success/10'
                     )}
                   >
-                    <Text className="w-[12%] text-sm font-medium text-foreground">{set.id}</Text>
+                    <Text className={cn(
+                      'w-[12%] text-sm font-medium',
+                      set.completed ? 'text-success' : 'text-foreground'
+                    )}>{set.id}</Text>
                     <Text className="w-[25%] text-xs text-muted-foreground">
                       {set.prevWeight} × {set.prevReps}
                     </Text>
@@ -253,11 +256,17 @@ export function ExerciseDetailSheet({
                         keyboardType="numeric"
                         value={set.weight}
                         onChangeText={(text) => onInputChange(exercise.id, set.id, 'weight', text)}
-                        className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
+                        className={cn(
+                          'h-8 text-center text-sm rounded border px-2',
+                          set.completed 
+                            ? 'bg-success/20 text-success border-success/30' 
+                            : 'bg-background text-foreground border-border'
+                        )}
                         placeholder={set.prevWeight ? String(deloadMode ? Math.round(set.prevWeight * 0.6) : set.prevWeight) : '—'}
                         placeholderTextColor="#71717A"
                         textAlignVertical="center"
                         style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
+                        editable={!set.completed}
                       />
                     </View>
                     <View className="w-[18%]">
@@ -265,11 +274,17 @@ export function ExerciseDetailSheet({
                         keyboardType="numeric"
                         value={set.reps}
                         onChangeText={(text) => onInputChange(exercise.id, set.id, 'reps', text)}
-                        className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
+                        className={cn(
+                          'h-8 text-center text-sm rounded border px-2',
+                          set.completed 
+                            ? 'bg-success/20 text-success border-success/30' 
+                            : 'bg-background text-foreground border-border'
+                        )}
                         placeholder={set.prevReps ? String(set.prevReps) : '—'}
                         placeholderTextColor="#71717A"
                         textAlignVertical="center"
                         style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
+                        editable={!set.completed}
                       />
                     </View>
                     <View className="w-[15%] items-center">
@@ -285,7 +300,7 @@ export function ExerciseDetailSheet({
                       </Pressable>
                     </View>
                     <View className="w-[12%] items-center">
-                      {exercise.sets.length > 1 && onRemoveSet && (
+                      {exercise.sets.length > 1 && onRemoveSet && !set.completed && (
                         <Pressable
                           onPress={() => onRemoveSet(exercise.id, set.id)}
                           className="h-8 w-8 rounded items-center justify-center"

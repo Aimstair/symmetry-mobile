@@ -1,7 +1,7 @@
 import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { View, Text, ActivityIndicator, AppState, AppStateStatus } from 'react-native';
 import { Session } from '@supabase/supabase-js';
 import * as Linking from 'expo-linking';
@@ -78,6 +78,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isProfileLoading, setIsProfileLoading] = useState(false);
   const [profileChecked, setProfileChecked] = useState(false);
   const [isReady, setIsReady] = useState(false);
+  const isFetchingProfile = useRef(false); // Prevent concurrent fetches
   
   // Get user and onboarding state from store
   const user = useAppStore((s) => s.user);
@@ -179,52 +180,83 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       
-      // **FIX: Immediately fetch user profile on SIGNED_IN to prevent login loop**
-      if (_event === 'SIGNED_IN' && session?.user?.id) {
+      // Handle profile fetch for SIGNED_IN and INITIAL_SESSION
+      // INITIAL_SESSION = existing session restored from storage
+      // SIGNED_IN = new sign-in completed
+      const shouldFetchProfile = (_event === 'SIGNED_IN' || _event === 'INITIAL_SESSION') 
+        && session?.user?.id 
+        && !isFetchingProfile.current;
+      
+      if (shouldFetchProfile) {
         if (__DEV__) {
-          console.log('🔍 SIGNED_IN - Starting profile fetch for:', session.user.email);
+          console.log(`🔍 ${_event} - Starting profile fetch for:`, session.user.email);
           console.log('🔍 Session user ID:', session.user.id);
         }
         
+        isFetchingProfile.current = true;
         setIsProfileLoading(true);
-        setProfileChecked(false); // Reset to ensure this handler completes
+        setProfileChecked(false);
         
-        // Small delay to ensure UI updates
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Add timeout to prevent infinite loading
+        const timeoutId = setTimeout(async () => {
+          if (isFetchingProfile.current) {
+            console.error('⚠️ Profile fetch timeout - forcing completion');
+            
+            // Verify session still exists before proceeding
+            const { data: { session: currentSession } } = await supabase.auth.getSession();
+            if (!currentSession) {
+              console.error('❌ Session lost during timeout - cannot proceed');
+              isFetchingProfile.current = false;
+              setIsProfileLoading(false);
+              setProfileChecked(true);
+              setSession(null);
+              return;
+            }
+            
+            if (__DEV__) {
+              console.log('✅ Session still valid after timeout, proceeding to onboarding');
+            }
+            
+            isFetchingProfile.current = false;
+            setIsProfileLoading(false);
+            setProfileChecked(true);
+            // Keep session intact - let it proceed to onboarding
+          }
+        }, 5000); // Increased to 5 second timeout to allow more time for DB query
         
         try {
-          const isCloud = isUsingCloudService();
-          if (__DEV__) {
-            console.log('🔍 isUsingCloudService:', isCloud);
+          if (!isUsingCloudService()) {
+            if (__DEV__) {
+              console.log('⚠️ Not using cloud service, skipping profile fetch');
+            }
+            clearTimeout(timeoutId);
+            isFetchingProfile.current = false;
+            setIsProfileLoading(false);
+            setProfileChecked(true);
+            return;
           }
           
-          if (isCloud) {
+          if (__DEV__) {
+            console.log('🔍 Fetching user profile for ID:', session.user.id);
+          }
+          
+          const cloudUser = await dataService.user.getUser(session.user.id);
+          
+          if (__DEV__) {
+            console.log('🔍 User fetch result:', cloudUser ? `Found: ${cloudUser.email}` : 'Not found');
+          }
+          
+          if (cloudUser) {
+            // User exists in database - update store
+            setUser(cloudUser);
+            completeOnboarding();
+            
             if (__DEV__) {
-              console.log('🔍 Fetching user profile for ID:', session.user.id);
-            }
-            
-            const cloudUser = await dataService.user.getUser(session.user.id);
-            
-            if (__DEV__) {
-              console.log('🔍 User fetch result:', cloudUser ? `Found: ${cloudUser.email}` : 'Not found');
-            }
-            
-            if (cloudUser) {
-              // User exists in database - update store
-              setUser(cloudUser);
-              completeOnboarding();
-              
-              if (__DEV__) {
-                console.log('✅ User profile loaded and store updated');
-              }
-            } else {
-              if (__DEV__) {
-                console.log('ℹ️ No user profile found - user needs onboarding');
-              }
+              console.log('✅ User profile loaded and store updated');
             }
           } else {
             if (__DEV__) {
-              console.log('⚠️ Not using cloud service, skipping profile fetch');
+              console.log('ℹ️ No user profile found - user needs onboarding');
             }
           }
         } catch (error) {
@@ -232,7 +264,10 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
           if (error instanceof Error) {
             console.error('❌ Error details:', error.message, error.stack);
           }
+          // Don't throw - proceed to onboarding even on error
         } finally {
+          clearTimeout(timeoutId);
+          isFetchingProfile.current = false;
           if (__DEV__) {
             console.log('✅ Profile fetch complete, clearing loading state');
           }
@@ -259,46 +294,9 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [handleDeepLink]);
 
-  // Fetch user profile from cloud when session exists
-  useEffect(() => {
-    async function fetchUserProfile() {
-      if (!session?.user?.id || profileChecked || user) return;
-      
-      setIsProfileLoading(true);
-      
-      try {
-        if (isUsingCloudService()) {
-          const cloudUser = await dataService.user.getUser(session.user.id);
-          
-          if (cloudUser) {
-            // User exists in database - update store
-            setUser(cloudUser);
-            completeOnboarding();
-            
-            if (__DEV__) {
-              console.log('✅ User profile loaded from cloud:', cloudUser.email);
-            }
-          } else {
-            if (__DEV__) {
-              console.log('ℹ️ No user profile found - needs onboarding');
-            }
-          }
-        }
-      } catch (error) {
-        if (__DEV__) {
-          console.log('⚠️ Could not fetch user profile:', error);
-        }
-      } finally {
-        setIsProfileLoading(false);
-        setProfileChecked(true);
-      }
-    }
-
-    if (session && !profileChecked) {
-      fetchUserProfile();
-    }
-  }, [session, profileChecked, user, setUser, completeOnboarding]);
-
+  // Note: Profile fetch is now handled in the SIGNED_IN event above
+  // This useEffect is disabled to prevent duplicate fetches
+  
   // Initialize exercise lookup cache for sync access
   useEffect(() => {
     if (session && profileChecked && isUsingCloudService()) {
@@ -449,14 +447,112 @@ function NavigationGuard() {
  * 
  * This component wraps the app and initializes data from the service.
  * It shows a loading screen while data is being fetched.
+ * Also handles auto-finishing stale workouts from previous days.
  */
 function DataInitializer({ children }: { children: React.ReactNode }) {
   // Get user from store (may be null initially, or hydrated from MMKV)
   const user = useAppStore((s) => s.user);
   const onboarding = useAppStore((s) => s.onboarding);
+  const activeWorkout = useAppStore((s) => s.activeWorkout);
+  const endWorkout = useAppStore((s) => s.endWorkout);
 
   // Initialize data - pass user ID if available
   const { isLoading, isInitialized, error, refetch } = useDataInitialization(user?.id || null);
+
+  // Auto-finish stale workouts from previous days
+  useEffect(() => {
+    if (!activeWorkout.isActive || !activeWorkout.startTime) return;
+
+    const checkAndAutoFinish = async () => {
+      const startTime = new Date(activeWorkout.startTime!);
+      const now = new Date();
+      
+      // Check if the workout was started on a different day
+      const startDay = new Date(startTime.getFullYear(), startTime.getMonth(), startTime.getDate());
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      
+      if (startDay < today) {
+        if (__DEV__) {
+          console.log('🔄 Auto-finishing stale workout from:', startTime.toISOString());
+        }
+
+        // Check if there are any completed sets to save
+        const exerciseSets = activeWorkout.exerciseSets || {};
+        const hasCompletedSets = Object.values(exerciseSets).some(
+          (sets) => sets.some((s) => s.isCompleted)
+        );
+
+        if (hasCompletedSets && user?.id) {
+          try {
+            // Prepare session data from stored exercise sets
+            const sessionExercises = Object.entries(exerciseSets)
+              .filter(([_, sets]) => sets.some((s) => s.isCompleted))
+              .map(([exerciseId, sets]) => ({
+                exerciseId,
+                sets: sets
+                  .filter((s) => s.isCompleted)
+                  .map((s) => ({
+                    weight: s.weight || 0,
+                    reps: s.reps || 0,
+                    isWarmup: s.isWarmup || false,
+                    isCompleted: s.isCompleted || false,
+                  })),
+              }));
+
+            // Save to cloud
+            await dataService.history.saveWorkoutSession({
+              userId: user.id,
+              planId: activeWorkout.workoutId || undefined,
+              name: 'Auto-saved Workout',
+              startedAt: startTime,
+              endedAt: new Date(startDay.getTime() + 23 * 60 * 60 * 1000 + 59 * 60 * 1000), // End of that day
+              warmupMode: activeWorkout.warmupMode,
+              deloadMode: activeWorkout.deloadMode,
+              exercises: sessionExercises,
+            });
+
+            if (__DEV__) {
+              console.log('✅ Stale workout auto-saved to cloud');
+            }
+          } catch (error) {
+            console.error('❌ Failed to auto-save stale workout:', error);
+          }
+        }
+
+        // End the workout regardless
+        endWorkout();
+        
+        if (__DEV__) {
+          console.log('✅ Stale workout ended');
+        }
+      }
+    };
+
+    checkAndAutoFinish();
+  }, [activeWorkout.isActive, activeWorkout.startTime, user?.id]);
+
+  // Also check when app comes to foreground
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && activeWorkout.isActive && activeWorkout.startTime) {
+        const startTime = new Date(activeWorkout.startTime);
+        const now = new Date();
+        
+        const startDay = new Date(startTime.getFullYear(), startTime.getMonth(), startTime.getDate());
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        
+        if (startDay < today) {
+          // Trigger re-render to run the auto-finish check
+          // The above useEffect will handle the actual auto-finish
+          if (__DEV__) {
+            console.log('🔄 App resumed with stale workout, will auto-finish');
+          }
+        }
+      }
+    });
+
+    return () => subscription.remove();
+  }, [activeWorkout.isActive, activeWorkout.startTime]);
 
   // Show loading screen while initializing (only for cloud service with a user)
   if (isUsingCloudService() && user?.id && isLoading && !isInitialized) {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, ScrollView, Pressable, TextInput, Alert, Animated } from 'react-native';
+import { View, Text, ScrollView, Pressable, TextInput, Alert, Animated, LayoutAnimation, Platform, UIManager } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle } from 'react-native-svg';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -34,6 +34,19 @@ import {
 import { cn } from '@/lib/utils';
 import type { PlanExercise, WorkoutDay, CatalogExercise } from '@/types';
 
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Custom spring animation config for smooth transitions
+const springConfig = {
+  duration: 300,
+  create: { type: LayoutAnimation.Types.spring, property: LayoutAnimation.Properties.opacity, springDamping: 0.7 },
+  update: { type: LayoutAnimation.Types.spring, springDamping: 0.7 },
+  delete: { type: LayoutAnimation.Types.spring, property: LayoutAnimation.Properties.opacity, springDamping: 0.7 },
+};
+
 // Isolated timer component to prevent full-screen re-renders
 const ElapsedTimer = ({ startTime }: { startTime: Date | null }) => {
   const [elapsed, setElapsed] = useState(0);
@@ -64,7 +77,7 @@ const ElapsedTimer = ({ startTime }: { startTime: Date | null }) => {
   );
 };
 
-// Isolated rest timer component
+// Isolated rest timer component with entrance/exit animations
 const RestTimerDisplay = ({ 
   restTimer, 
   onStop, 
@@ -74,6 +87,44 @@ const RestTimerDisplay = ({
   onStop: () => void;
   onUpdate: (elapsed: number) => void;
 }) => {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.8)).current;
+  const [isVisible, setIsVisible] = useState(false);
+
+  // Handle entrance/exit animations
+  useEffect(() => {
+    if (restTimer.isRunning) {
+      setIsVisible(true);
+      Animated.parallel([
+        Animated.spring(fadeAnim, {
+          toValue: 1,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }),
+        Animated.spring(scaleAnim, {
+          toValue: 1,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 0,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(scaleAnim, {
+          toValue: 0.8,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+      ]).start(() => setIsVisible(false));
+    }
+  }, [restTimer.isRunning, fadeAnim, scaleAnim]);
+
   useEffect(() => {
     if (!restTimer.isRunning) return;
 
@@ -101,11 +152,17 @@ const RestTimerDisplay = ({
     : 0;
   const strokeDashoffset = circumference * (1 - progress);
 
-  if (!restTimer.isRunning) return null;
+  if (!isVisible) return null;
 
   return (
-    <View className="absolute inset-0 z-50 bg-background/95 items-center justify-center">
-      <View className="items-center">
+    <Animated.View 
+      className="absolute inset-0 z-50 bg-background/95 items-center justify-center"
+      style={{ opacity: fadeAnim }}
+    >
+      <Animated.View 
+        className="items-center"
+        style={{ transform: [{ scale: scaleAnim }] }}
+      >
         <Text className="text-sm text-muted-foreground mb-4 uppercase tracking-wide">Rest Timer</Text>
         
         <View className="relative w-48 h-48 mb-8 items-center justify-center">
@@ -158,8 +215,8 @@ const RestTimerDisplay = ({
             <Text className="text-primary-foreground font-semibold">I'm Ready</Text>
           </Button>
         </View>
-      </View>
-    </View>
+      </Animated.View>
+    </Animated.View>
   );
 };
 
@@ -198,7 +255,7 @@ function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
     const equipment = ex.exercise?.equipment[0] || 'Unknown';
 
     return {
-      id: ex.id,
+      id: ex.exerciseId, // Use catalog exercise ID (e.g., 'bench_press'), not plan_exercise UUID
       name: exerciseName,
       muscleGroup: muscleGroup,
       equipment: equipment,
@@ -238,6 +295,10 @@ export default function ActiveWorkout() {
     setCurrentExercise,
     syncSwapExerciseToCloud,
     syncAddExerciseToDayCloud,
+    syncSaveWorkoutSession,
+    syncMarkTodayWorkoutCompleted,
+    syncEnsureTodaySchedule,
+    updateActiveWorkoutSets,
   } = useAppStore();
 
   // Local state
@@ -318,11 +379,82 @@ export default function ActiveWorkout() {
     }, [activeWorkout.isActive, activeWorkout.workoutId, router])
   );
 
-  // Initialize exercises from current day
+  // Persist workout progress when leaving screen
+  useFocusEffect(
+    useCallback(() => {
+      // Return cleanup function that runs when screen loses focus
+      return () => {
+        if (exercises.length > 0) {
+          // Convert exercises to storable format (SessionSet compatible)
+          const exerciseSets: Record<string, any[]> = {};
+          exercises.forEach((ex) => {
+            exerciseSets[ex.id] = ex.sets.map((s) => ({
+              id: `temp-${s.id}`,
+              sessionExerciseId: ex.id,
+              setNumber: s.id,
+              weight: parseFloat(s.weight) || 0,
+              reps: parseInt(s.reps) || 0,
+              isWarmup: s.isWarmup,
+              isCompleted: s.completed,
+              createdAt: new Date(),
+            }));
+          });
+          updateActiveWorkoutSets(exerciseSets);
+          if (__DEV__) {
+            console.log('💾 Workout progress saved on screen blur');
+          }
+        }
+      };
+    }, [exercises, updateActiveWorkoutSets])
+  );
+
+  // Initialize exercises from current day (restore progress if available)
   useEffect(() => {
+    // Only initialize if exercises are not already set (first load or workout reset)
+    if (exercises.length > 0) {
+      if (__DEV__) {
+        console.log('⏭️ Exercises already loaded, skipping initialization');
+      }
+      return;
+    }
+    
     if (currentDay?.exercises && currentDay.exercises.length > 0) {
       const sessionExercises = convertToSessionExercises(currentDay.exercises);
+      
+      // Restore saved progress from store if available
+      if (activeWorkout.exerciseSets && Object.keys(activeWorkout.exerciseSets).length > 0) {
+        sessionExercises.forEach((ex) => {
+          const savedSets = activeWorkout.exerciseSets[ex.id];
+          if (savedSets && savedSets.length > 0) {
+            // Restore saved set data (convert from SessionSet to SetData)
+            ex.sets = savedSets.map((saved, idx) => ({
+              id: idx + 1,
+              weight: String(saved.weight || ''),
+              reps: String(saved.reps || ''),
+              completed: saved.isCompleted || false,
+              isWarmup: saved.isWarmup || false,
+              tags: [],
+              prevWeight: ex.sets[idx]?.prevWeight,
+              prevReps: ex.sets[idx]?.prevReps,
+            }));
+          }
+        });
+        if (__DEV__) {
+          console.log('📥 Workout progress restored from store');
+        }
+      }
+      
       setExercises(sessionExercises);
+      
+      // Create schedule entry for today's workout
+      if (currentPlan && currentDay) {
+        syncEnsureTodaySchedule(currentPlan.id, {
+          name: currentDay.name,
+          muscleGroups: currentDay.muscleGroups,
+          exercises: currentDay.exercises,
+          dayName: currentDay.dayName,
+        });
+      }
       
       // Animate exercises entrance
       sessionExercises.forEach((ex, index) => {
@@ -340,7 +472,7 @@ export default function ActiveWorkout() {
         }).start();
       });
     }
-  }, [currentDay]);
+  }, [currentDay, currentPlan, exercises.length, activeWorkout.exerciseSets]);
 
   // Calculate workout stats
   const workoutStats = useMemo(() => {
@@ -360,7 +492,24 @@ export default function ActiveWorkout() {
   }, [exercises]);
 
   // Handle workout completion
-  const handleFinishWorkout = () => {
+  const handleFinishWorkout = async () => {
+    // Check if any sets are completed
+    if (workoutStats.completedSets === 0) {
+      Alert.alert(
+        'No Sets Logged',
+        'You haven\'t completed any sets yet. Are you sure you want to finish?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Finish Anyway',
+            style: 'destructive',
+            onPress: () => finishAndSaveWorkout(),
+          },
+        ]
+      );
+      return;
+    }
+
     Alert.alert(
       'Finish Workout',
       `Complete ${workoutStats.completedSets}/${workoutStats.totalSets} sets logged. Finish this workout?`,
@@ -368,17 +517,71 @@ export default function ActiveWorkout() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Finish',
-          onPress: () => {
-            endWorkout();
-            setShowCompletionModal(true);
-          },
+          onPress: () => finishAndSaveWorkout(),
         },
       ]
     );
   };
 
+  // Save workout session to database and clean up
+  const finishAndSaveWorkout = async () => {
+    try {
+      // Prepare session data from exercises
+      const sessionExercises = exercises
+        .filter(ex => ex.sets.some(s => s.completed)) // Only include exercises with completed sets
+        .map(ex => ({
+          exerciseId: ex.id,
+          sets: ex.sets
+            .filter(s => s.completed) // Only include completed sets
+            .map(s => ({
+              weight: parseFloat(s.weight) || 0,
+              reps: parseInt(s.reps) || 0,
+              isWarmup: s.isWarmup,
+              isCompleted: s.completed,
+            })),
+        }));
+
+      // Save to cloud and get session ID
+      const sessionId = await syncSaveWorkoutSession({
+        name: currentDay?.name || 'Workout Session',
+        exercises: sessionExercises,
+      });
+
+      // Mark today's scheduled workout as completed (if exists)
+      if (sessionId) {
+        await syncMarkTodayWorkoutCompleted(sessionId);
+      }
+
+      // End workout in store
+      endWorkout();
+      
+      // Show completion modal
+      setShowCompletionModal(true);
+    } catch (error) {
+      console.error('Failed to save workout session:', error);
+      Alert.alert(
+        'Error Saving Workout',
+        'Your workout data could not be saved. Would you like to try again?',
+        [
+          { text: 'Try Again', onPress: () => finishAndSaveWorkout() },
+          { 
+            text: 'Finish Without Saving', 
+            style: 'destructive',
+            onPress: () => {
+              endWorkout();
+              setShowCompletionModal(true);
+            }
+          },
+        ]
+      );
+    }
+  };
+
   // Handle adding a new set to an exercise
   const handleAddSet = (exerciseId: string) => {
+    // Trigger layout animation for smooth transition
+    LayoutAnimation.configureNext(springConfig);
+    
     setExercises((prev) =>
       prev.map((ex) => {
         if (ex.id !== exerciseId) return ex;
@@ -408,6 +611,9 @@ export default function ActiveWorkout() {
 
   // Handle removing a set from an exercise (minimum 1 set)
   const handleRemoveSet = (exerciseId: string, setId: number) => {
+    // Trigger layout animation for smooth transition
+    LayoutAnimation.configureNext(springConfig);
+    
     setExercises((prev) =>
       prev.map((ex) => {
         if (ex.id !== exerciseId || ex.sets.length <= 1) return ex;
@@ -425,24 +631,46 @@ export default function ActiveWorkout() {
     );
   };
 
-  // Handle set completion - now uses store rest timer
+  // Handle set completion - validates inputs and uses store rest timer
   const handleSetComplete = (exerciseId: string, setId: number) => {
+    const exercise = exercises.find((e) => e.id === exerciseId);
+    const set = exercise?.sets.find((s) => s.id === setId);
+    
+    if (!set) return;
+    
+    // If trying to complete (not uncomplete), validate inputs
+    if (!set.completed) {
+      const weight = parseFloat(set.weight);
+      const reps = parseInt(set.reps);
+      
+      if (isNaN(weight) || weight <= 0 || isNaN(reps) || reps <= 0) {
+        Alert.alert(
+          'Missing Input',
+          'Please enter both weight and reps before marking the set as complete.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
+    
+    // Trigger layout animation for progress bar update
+    LayoutAnimation.configureNext(springConfig);
+    
     setExercises((prev) =>
       prev.map((ex) =>
         ex.id === exerciseId
           ? {
               ...ex,
-              sets: ex.sets.map((set) =>
-                set.id === setId ? { ...set, completed: !set.completed } : set
+              sets: ex.sets.map((s) =>
+                s.id === setId ? { ...s, completed: !s.completed } : s
               ),
             }
           : ex
       )
     );
     
-    // Start rest timer via store
-    const exercise = exercises.find((e) => e.id === exerciseId);
-    if (exercise) {
+    // Start rest timer only when completing (not uncompleting)
+    if (!set.completed && exercise) {
       startRestTimer(exercise.restSeconds);
     }
   };
@@ -780,14 +1008,17 @@ export default function ActiveWorkout() {
 
                   {/* Working sets */}
                   {exercise.sets.map((set) => (
-                    <View
+                    <Animated.View
                       key={set.id}
                       className={cn(
                         'flex-row px-4 py-3 items-center border-b border-border/30',
                         set.completed && 'bg-success/10'
                       )}
                     >
-                      <Text className="w-[12%] text-sm font-medium text-foreground">{set.id}</Text>
+                      <Text className={cn(
+                        'w-[12%] text-sm font-medium',
+                        set.completed ? 'text-success' : 'text-foreground'
+                      )}>{set.id}</Text>
                       <Text className="w-[25%] text-xs text-muted-foreground">
                         {set.prevWeight ? `${set.prevWeight} × ${set.prevReps}` : '—'}
                       </Text>
@@ -796,11 +1027,17 @@ export default function ActiveWorkout() {
                           keyboardType="numeric"
                           value={set.weight}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'weight', text)}
-                          className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
+                          className={cn(
+                            'h-8 text-center text-sm rounded border px-2',
+                            set.completed 
+                              ? 'bg-success/20 text-success border-success/30' 
+                              : 'bg-background text-foreground border-border'
+                          )}
                           placeholder={set.prevWeight ? String(activeWorkout.deloadMode ? Math.round(set.prevWeight * 0.6) : set.prevWeight) : '—'}
                           placeholderTextColor="#71717A"
                           textAlignVertical="center"
                           style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
+                          editable={!set.completed}
                         />
                       </View>
                       <View className="w-[18%]">
@@ -808,11 +1045,17 @@ export default function ActiveWorkout() {
                           keyboardType="numeric"
                           value={set.reps}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'reps', text)}
-                          className="h-8 text-center text-sm bg-background text-foreground rounded border border-border px-2"
+                          className={cn(
+                            'h-8 text-center text-sm rounded border px-2',
+                            set.completed 
+                              ? 'bg-success/20 text-success border-success/30' 
+                              : 'bg-background text-foreground border-border'
+                          )}
                           placeholder={set.prevReps ? String(set.prevReps) : '—'}
                           placeholderTextColor="#71717A"
                           textAlignVertical="center"
                           style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
+                          editable={!set.completed}
                         />
                       </View>
                       <View className="w-[15%] items-center">
@@ -828,7 +1071,7 @@ export default function ActiveWorkout() {
                         </Pressable>
                       </View>
                       <View className="w-[12%] items-center">
-                        {exercise.sets.length > 1 && (
+                        {exercise.sets.length > 1 && !set.completed && (
                           <Pressable
                             onPress={() => handleRemoveSet(exercise.id, set.id)}
                             className="h-8 w-8 rounded items-center justify-center"
@@ -838,7 +1081,7 @@ export default function ActiveWorkout() {
                           </Pressable>
                         )}
                       </View>
-                    </View>
+                    </Animated.View>
                   ))}
 
                   {/* Add Set */}

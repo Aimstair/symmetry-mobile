@@ -47,6 +47,7 @@ export default function WorkoutPlanScreen() {
   const user = useAppStore((s) => s.user);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const isLoading = useAppStore((s) => s.isLoading);
+  const workoutHistory = useAppStore((s) => s.workoutHistory);
 
   // Store actions for day toggling
   const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
@@ -54,6 +55,7 @@ export default function WorkoutPlanScreen() {
   const syncRemoveWorkoutDayFromCloud = useAppStore((s) => s.syncRemoveWorkoutDayFromCloud);
   const syncAddExerciseToDayCloud = useAppStore((s) => s.syncAddExerciseToDayCloud);
   const startWorkout = useAppStore((s) => s.startWorkout);
+  const syncFetchWorkoutHistory = useAppStore((s) => s.syncFetchWorkoutHistory);
 
   // Get user's training days (from onboarding)
   const trainingDays = useMemo(() => {
@@ -76,10 +78,31 @@ export default function WorkoutPlanScreen() {
   // Week navigation state
   const [currentWeekStart, setCurrentWeekStart] = useState(() => getWeekStart(new Date()));
 
+  // Fetch workout history when screen loads
+  useFocusEffect(
+    useCallback(() => {
+      syncFetchWorkoutHistory();
+    }, [syncFetchWorkoutHistory])
+  );
+
+  // Parse workout history into completed dates Set
+  const completedDates = useMemo(() => {
+    const dates = new Set<string>();
+    workoutHistory.forEach((session: any) => {
+      if (session.startedAt) {
+        // Convert to ISO date string (YYYY-MM-DD)
+        const date = new Date(session.startedAt);
+        const dateStr = date.toISOString().split('T')[0];
+        dates.add(dateStr);
+      }
+    });
+    return dates;
+  }, [workoutHistory]);
+
   // Generate calendar days from the active plan and training days
   const calendarDays = useMemo(() => {
-    return mapWorkoutPlanToWeek(activePlan, currentWeekStart, trainingDays);
-  }, [activePlan, currentWeekStart, trainingDays]);
+    return mapWorkoutPlanToWeek(activePlan, currentWeekStart, trainingDays, completedDates);
+  }, [activePlan, currentWeekStart, trainingDays, completedDates]);
 
   // Find today's index for default selection
   const todayIndex = useMemo(() => {

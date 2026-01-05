@@ -36,6 +36,7 @@ interface AppState {
   // Workout Data
   workoutPlans: WorkoutPlan[];
   activeWorkout: ActiveWorkoutState;
+  workoutHistory: any[]; // WorkoutSession[] - stores completed workouts
 
   // Progress Data
   bodyMeasurements: BodyMeasurement[];
@@ -119,6 +120,30 @@ interface AppState {
   syncAddCardioLog: (log: CardioLog) => Promise<CardioLog>;
 
   syncUpdateNutritionTargets: (targets: NutritionTargets) => Promise<void>;
+  
+  // Async Actions - Workout Sessions
+  syncSaveWorkoutSession: (sessionData: {
+    name: string;
+    exercises: {
+      exerciseId: string;
+      sets: {
+        weight: number;
+        reps: number;
+        isWarmup: boolean;
+        isCompleted: boolean;
+      }[];
+    }[];
+  }) => Promise<string | undefined>; // Returns session ID
+  
+  // Async Actions - Schedule  
+  syncMarkTodayWorkoutCompleted: (sessionId: string) => Promise<void>;
+  syncEnsureTodaySchedule: (planId: string, daySnapshot: any) => Promise<void>;
+  
+  // Async Actions - Workout History
+  syncFetchWorkoutHistory: () => Promise<void>;
+  
+  // Actions - Active Workout Progress (stores in-progress set data)
+  updateActiveWorkoutSets: (exerciseSets: Record<string, any[]>) => void;
 }
 
 const initialSettings: AppSettings = {
@@ -164,6 +189,7 @@ export const useAppStore = create<AppState>()(
       equipment: null,
       workoutPlans: [],
       activeWorkout: initialActiveWorkout,
+      workoutHistory: [],
       bodyMeasurements: [],
       physiqueScans: [],
       cardioLogs: [],
@@ -750,6 +776,148 @@ export const useAppStore = create<AppState>()(
           throw error; // Rethrow so UI can show error if needed
         }
       },
+
+      // Save workout session to cloud (returns session ID)
+      syncSaveWorkoutSession: async (sessionData) => {
+        const state = get();
+        const user = state.user;
+        const activeWorkout = state.activeWorkout;
+        
+        if (!user?.id || !activeWorkout.startTime) {
+          console.error('❌ Cannot save session: no user or start time');
+          return undefined;
+        }
+
+        set({ isLoading: true, loadingMessage: 'Saving workout...' });
+        try {
+          const savedSession = await dataService.history.saveWorkoutSession({
+            userId: user.id,
+            planId: activeWorkout.workoutId || undefined,
+            workoutDayId: undefined, // Could be enhanced to include this
+            name: sessionData.name,
+            startedAt: activeWorkout.startTime,
+            endedAt: new Date(),
+            warmupMode: activeWorkout.warmupMode,
+            deloadMode: activeWorkout.deloadMode,
+            exercises: sessionData.exercises,
+          });
+
+          if (__DEV__) console.log('✅ Workout session saved to cloud:', savedSession.id);
+          
+          set({ isLoading: false, loadingMessage: null });
+          return savedSession.id;
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to save workout session:', error);
+          throw error;
+        }
+      },
+
+      // Mark today's scheduled workout as completed
+      syncMarkTodayWorkoutCompleted: async (sessionId) => {
+        const state = get();
+        const user = state.user;
+        
+        if (!user?.id) {
+          console.error('❌ Cannot mark workout completed: no user');
+          return;
+        }
+
+        try {
+          // Get today's scheduled workout
+          const today = new Date();
+          const scheduledWorkout = await dataService.schedule.getScheduledWorkout(user.id, today);
+          
+          if (scheduledWorkout) {
+            // Update the schedule status to completed with the session ID
+            await dataService.schedule.updateScheduleStatus(
+              scheduledWorkout.id,
+              'completed',
+              sessionId
+            );
+            
+            if (__DEV__) console.log('✅ Schedule marked as completed:', scheduledWorkout.id);
+          } else {
+            if (__DEV__) console.log('ℹ️ No scheduled workout found for today');
+          }
+        } catch (error) {
+          console.error('❌ Failed to mark schedule as completed:', error);
+          // Don't throw - this is a secondary operation
+        }
+      },
+
+      // Ensure today's workout is scheduled (called when starting workout)
+      syncEnsureTodaySchedule: async (planId, daySnapshot) => {
+        const state = get();
+        const user = state.user;
+        
+        if (!user?.id) {
+          console.error('❌ Cannot create schedule: no user');
+          return;
+        }
+
+        try {
+          const today = new Date();
+          
+          // Check if schedule already exists
+          const existingSchedule = await dataService.schedule.getScheduledWorkout(user.id, today);
+          
+          if (!existingSchedule) {
+            // Create schedule entry for today
+            await dataService.schedule.scheduleWorkout(
+              user.id,
+              today,
+              planId,
+              daySnapshot
+            );
+            
+            if (__DEV__) console.log('✅ Created schedule entry for today');
+          } else {
+            if (__DEV__) console.log('ℹ️ Schedule already exists for today');
+          }
+        } catch (error) {
+          console.error('❌ Failed to create schedule:', error);
+          // Don't throw - workout can still proceed
+        }
+      },
+
+      // Fetch workout history for the current user
+      syncFetchWorkoutHistory: async () => {
+        const state = get();
+        const user = state.user;
+        
+        if (!user?.id) {
+          console.error('❌ Cannot fetch workout history: no user');
+          return;
+        }
+
+        try {
+          // Fetch recent workout history (last 90 days)
+          const startDate = new Date();
+          startDate.setDate(startDate.getDate() - 90);
+          
+          const history = await dataService.history.getWorkoutHistory(user.id, {
+            startDate,
+            limit: 100,
+          });
+          
+          set({ workoutHistory: history });
+          
+          if (__DEV__) console.log('✅ Fetched workout history:', history.length, 'sessions');
+        } catch (error) {
+          console.error('❌ Failed to fetch workout history:', error);
+          // Don't throw - UI can still work without history
+        }
+      },
+
+      // Update active workout progress (for persistence when leaving screen)
+      updateActiveWorkoutSets: (exerciseSets) =>
+        set((state) => ({
+          activeWorkout: {
+            ...state.activeWorkout,
+            exerciseSets: exerciseSets as Record<string, import('@/types').SessionSet[]>,
+          },
+        })),
     }),
     {
       name: 'symmetry-storage',

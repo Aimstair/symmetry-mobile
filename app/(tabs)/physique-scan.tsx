@@ -157,19 +157,21 @@ export default function PhysiqueScan() {
           clearInterval(interval);
           
           // Generate mock scan results (in production, this would come from AI analysis)
+          const muscleScores = {
+            chest: Math.floor(Math.random() * 25) + 70,
+            back: Math.floor(Math.random() * 25) + 70,
+            shoulders: Math.floor(Math.random() * 25) + 70,
+            arms: Math.floor(Math.random() * 25) + 70,
+            legs: Math.floor(Math.random() * 25) + 70,
+          };
+          
           const newScan: PhysiqueScanType = {
             id: Crypto.randomUUID(),
             userId: user.id,
             date: new Date(),
             images: {},
-            symmetryScore: Math.floor(Math.random() * 20) + 75, // 75-95 range
-            muscleScores: {
-              chest: Math.floor(Math.random() * 25) + 70,
-              back: Math.floor(Math.random() * 25) + 70,
-              shoulders: Math.floor(Math.random() * 25) + 70,
-              arms: Math.floor(Math.random() * 25) + 70,
-              legs: Math.floor(Math.random() * 25) + 70,
-            },
+            muscleScores,
+            symmetryScore: Math.ceil((muscleScores.chest + muscleScores.back + muscleScores.shoulders + muscleScores.arms + muscleScores.legs) / 5), // Average of muscle scores
             notes: 'AI-generated analysis',
           };
           
