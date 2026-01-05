@@ -493,6 +493,7 @@ class CloudWorkoutService implements IWorkoutService {
         plan_id: planId,
         order_index: day.orderIndex,
         name: day.name,
+        day_name: day.dayName || null,
         muscle_groups: day.muscleGroups,
       })
       .select()
@@ -505,6 +506,7 @@ class CloudWorkoutService implements IWorkoutService {
       planId: data.plan_id,
       orderIndex: data.order_index,
       name: data.name,
+      dayName: data.day_name || undefined,
       muscleGroups: data.muscle_groups || [],
       exercises: [],
       createdAt: new Date(data.created_at),
@@ -517,6 +519,7 @@ class CloudWorkoutService implements IWorkoutService {
     if (updates.name) dbUpdates.name = updates.name;
     if (updates.orderIndex !== undefined) dbUpdates.order_index = updates.orderIndex;
     if (updates.muscleGroups) dbUpdates.muscle_groups = updates.muscleGroups;
+    if (updates.dayName !== undefined) dbUpdates.day_name = updates.dayName;
 
     const { data, error } = await supabase
       .from('workout_days')
@@ -634,6 +637,7 @@ class CloudWorkoutService implements IWorkoutService {
       planId: row.plan_id,
       orderIndex: row.order_index,
       name: row.name,
+      dayName: row.day_name || undefined,
       muscleGroups: row.muscle_groups || [],
       exercises: (row.plan_exercises || [])
         .sort((a: any, b: any) => a.order_index - b.order_index)
@@ -1237,32 +1241,53 @@ class CloudProgressService implements IProgressService {
 
 class CloudUserService implements IUserService {
   async getUser(userId: string): Promise<User | null> {
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw new Error(`Failed to fetch user: ${error.message}`);
+    if (__DEV__) {
+      console.log('☁️ CloudService.getUser called for:', userId);
     }
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
 
-    if (!data) return null;
+      if (__DEV__) {
+        console.log('☁️ CloudService.getUser result:', { hasData: !!data, error: error?.message || null });
+      }
 
-    return {
-      id: data.id,
-      name: data.name,
-      email: data.email,
-      age: data.age,
-      gender: data.gender,
-      height: data.height,
-      weight: data.weight,
-      goal: data.goal,
-      experienceLevel: data.experience_level,
-      createdAt: new Date(data.created_at),
-      updatedAt: new Date(data.updated_at),
-    };
+      if (error) {
+        if (error.code === 'PGRST116') {
+          if (__DEV__) {
+            console.log('☁️ User not found (PGRST116), returning null');
+          }
+          return null;
+        }
+        throw new Error(`Failed to fetch user: ${error.message}`);
+      }
+
+      if (!data) return null;
+
+      return {
+        id: data.id,
+        name: data.name,
+        email: data.email,
+        age: data.age,
+        gender: data.gender,
+        height: data.height,
+        weight: data.weight,
+        goal: data.goal,
+        experienceLevel: data.experience_level,
+        trainingDays: data.training_days || [],
+        createdAt: new Date(data.created_at),
+        updatedAt: new Date(data.updated_at),
+      };
+    } catch (error) {
+      if (__DEV__) {
+        console.error('☁️ CloudService.getUser error:', error);
+      }
+      throw error;
+    }
   }
 
   async getNutritionTargets(userId: string): Promise<NutritionTargets | null> {
@@ -1325,6 +1350,7 @@ class CloudUserService implements IUserService {
         weight: user.weight,
         goal: user.goal,
         experience_level: user.experienceLevel,
+        training_days: user.trainingDays || [],
       })
       .select()
       .single();
@@ -1341,6 +1367,7 @@ class CloudUserService implements IUserService {
       weight: data.weight,
       goal: data.goal,
       experienceLevel: data.experience_level,
+      trainingDays: data.training_days || [],
       createdAt: new Date(data.created_at),
       updatedAt: new Date(data.updated_at),
     };
@@ -1356,6 +1383,7 @@ class CloudUserService implements IUserService {
     if (updates.weight) dbUpdates.weight = updates.weight;
     if (updates.goal) dbUpdates.goal = updates.goal;
     if (updates.experienceLevel) dbUpdates.experience_level = updates.experienceLevel;
+    if (updates.trainingDays) dbUpdates.training_days = updates.trainingDays;
 
     const { data, error } = await supabase
       .from('users')
@@ -1376,6 +1404,7 @@ class CloudUserService implements IUserService {
       weight: data.weight,
       goal: data.goal,
       experienceLevel: data.experience_level,
+      trainingDays: data.training_days || [],
       createdAt: new Date(data.created_at),
       updatedAt: new Date(data.updated_at),
     };

@@ -30,7 +30,7 @@ import {
   Trophy,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
-import type { Exercise as ExerciseType, WorkoutDay } from '@/types';
+import type { PlanExercise, WorkoutDay } from '@/types';
 
 // Extended set data for tracking during workout
 interface SetData {
@@ -59,28 +59,35 @@ interface ExerciseData {
 }
 
 // Convert plan exercises to workout session format
-function convertToSessionExercises(exercises: ExerciseType[]): ExerciseData[] {
-  return exercises.map((ex) => ({
-    id: ex.id,
-    name: ex.name,
-    muscleGroup: ex.muscleGroup,
-    equipment: ex.equipment,
-    targetSets: ex.sets,
-    targetReps: ex.reps,
-    restSeconds: ex.restSeconds,
-    notes: ex.notes,
-    sets: Array.from({ length: ex.sets }, (_, i) => ({
-      id: i + 1,
-      weight: '',
-      reps: '',
-      completed: false,
-      isWarmup: false,
-      tags: [],
-      // In a real app, these would come from workout history
-      prevWeight: undefined,
-      prevReps: undefined,
-    })),
-  }));
+function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
+  return exercises.map((ex) => {
+    // Get exercise name from hydrated exercise or use exerciseId as fallback
+    const exerciseName = ex.exercise?.name || ex.exerciseId;
+    const muscleGroup = ex.exercise?.muscleGroups[0] || 'General';
+    const equipment = ex.exercise?.equipment[0] || 'Unknown';
+
+    return {
+      id: ex.id,
+      name: exerciseName,
+      muscleGroup: muscleGroup,
+      equipment: equipment,
+      targetSets: ex.targetSets,
+      targetReps: ex.targetReps,
+      restSeconds: ex.restSeconds,
+      notes: ex.notes,
+      sets: Array.from({ length: ex.targetSets }, (_, i) => ({
+        id: i + 1,
+        weight: '',
+        reps: '',
+        completed: false,
+        isWarmup: false,
+        tags: [],
+        // In a real app, these would come from workout history
+        prevWeight: undefined,
+        prevReps: undefined,
+      })),
+    };
+  });
 }
 
 export default function ActiveWorkout() {
@@ -98,6 +105,7 @@ export default function ActiveWorkout() {
     updateRestTimer,
     stopRestTimer,
     setCurrentExercise,
+    syncSwapExerciseToCloud,
   } = useAppStore();
 
   // Local state
@@ -126,7 +134,9 @@ export default function ActiveWorkout() {
     }
 
     // Determine today's workout day using the calendar utility
-    const calendarDays = getCurrentWeekCalendar(plan);
+    const user = useAppStore.getState().user;
+    const trainingDays = user?.trainingDays || [];
+    const calendarDays = getCurrentWeekCalendar(plan, trainingDays);
     const today = new Date();
     const todayCalendarDay = calendarDays.find(
       (day) =>
@@ -269,7 +279,8 @@ export default function ActiveWorkout() {
     );
   };
 
-  const handleSwapExercise = (exerciseId: string, newExerciseId: string, newName: string) => {
+  const handleSwapExercise = async (exerciseId: string, newExerciseId: string, newName: string) => {
+    // Update local state immediately for UI
     setExercises((prev) =>
       prev.map((ex) =>
         ex.id === exerciseId
@@ -277,6 +288,25 @@ export default function ActiveWorkout() {
           : ex
       )
     );
+    
+    // Sync to cloud if we have plan context
+    if (currentPlan && currentDay) {
+      try {
+        // Find the original exercise in the plan to get its actual ID
+        const originalExercise = currentDay.exercises.find(e => e.id === exerciseId);
+        if (originalExercise) {
+          await syncSwapExerciseToCloud(
+            currentPlan.id,
+            currentDay.id,
+            originalExercise.id,
+            newExerciseId
+          );
+        }
+      } catch (error) {
+        console.error('Failed to sync exercise swap:', error);
+        // The local state is already updated, so user can continue
+      }
+    }
   };
 
   const handleViewHistory = (exerciseId: string) => {

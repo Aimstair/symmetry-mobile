@@ -167,6 +167,7 @@ export default function Onboarding() {
           gender: formData.gender,
           experienceLevel: formData.experience as 'beginner' | 'intermediate' | 'advanced',
           goal: (formData.goal === 'maintain' ? 'maintenance' : formData.goal) as 'bulk' | 'cut' | 'recomp' | 'maintenance',
+          trainingDays: formData.selectedDays, // Save selected training days
           createdAt: new Date(),
           updatedAt: new Date(),
         };

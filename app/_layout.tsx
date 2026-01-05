@@ -1,4 +1,4 @@
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useEffect, useState, useCallback } from 'react';
@@ -164,16 +164,97 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     // Listen for auth state changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (isMounted) {
-        setSession(session);
-        // Reset profile check when auth changes
-        if (!session) {
-          setProfileChecked(false);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!isMounted) return;
+      
+      if (__DEV__) {
+        console.log('🔄 Auth state changed:', _event, session?.user?.email || 'No user');
+      }
+      
+      setSession(session);
+      
+      // Reset profile check when auth changes
+      if (!session) {
+        setProfileChecked(false);
+        return;
+      }
+      
+      // **FIX: Immediately fetch user profile on SIGNED_IN to prevent login loop**
+      if (_event === 'SIGNED_IN' && session?.user?.id) {
+        if (__DEV__) {
+          console.log('🔍 SIGNED_IN - Starting profile fetch for:', session.user.email);
+          console.log('🔍 Session user ID:', session.user.id);
         }
         
-        if (__DEV__) {
-          console.log('🔄 Auth state changed:', _event, session?.user?.email || 'No user');
+        setIsProfileLoading(true);
+        setProfileChecked(false); // Reset to ensure this handler completes
+        
+        // Small delay to ensure UI updates
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        try {
+          const isCloud = isUsingCloudService();
+          if (__DEV__) {
+            console.log('🔍 isUsingCloudService:', isCloud);
+          }
+          
+          if (isCloud) {
+            if (__DEV__) {
+              console.log('🔍 Fetching user profile for ID:', session.user.id);
+            }
+            
+            // Add timeout to prevent infinite hang
+            const timeoutPromise = new Promise<null>((_, reject) => 
+              setTimeout(() => reject(new Error('Profile fetch timeout after 10s')), 10000)
+            );
+            
+            let cloudUser: Awaited<ReturnType<typeof dataService.user.getUser>> = null;
+            try {
+              cloudUser = await Promise.race([
+                dataService.user.getUser(session.user.id),
+                timeoutPromise
+              ]);
+            } catch (fetchError) {
+              if (__DEV__) {
+                console.log('⚠️ User fetch error/timeout:', fetchError);
+              }
+              // Treat timeout/error as user not found - redirect to onboarding
+              cloudUser = null;
+            }
+            
+            if (__DEV__) {
+              console.log('🔍 User fetch result:', cloudUser ? `Found: ${cloudUser.email}` : 'Not found');
+            }
+            
+            if (cloudUser) {
+              // User exists in database - update store
+              setUser(cloudUser);
+              completeOnboarding();
+              
+              if (__DEV__) {
+                console.log('✅ User profile loaded and store updated');
+              }
+            } else {
+              if (__DEV__) {
+                console.log('ℹ️ No user profile found - user needs onboarding');
+              }
+            }
+          } else {
+            if (__DEV__) {
+              console.log('⚠️ Not using cloud service, skipping profile fetch');
+            }
+          }
+        } catch (error) {
+          console.error('❌ Error fetching user profile:', error);
+          if (error instanceof Error) {
+            console.error('❌ Error details:', error.message, error.stack);
+          }
+        } finally {
+          if (__DEV__) {
+            console.log('✅ Profile fetch complete, clearing loading state');
+          }
+          setIsProfileLoading(false);
+          setProfileChecked(true);
         }
       }
     });
@@ -252,72 +333,12 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     if (isAuthLoading || isProfileLoading) return;
     if (session && !profileChecked) return; // Wait for profile check
 
-    if (__DEV__) {
-      console.log('🧭 Navigation check:', {
-        hasSession: !!session,
-        hasUser: !!user,
-        onboardingCompleted: onboarding.completed,
-        profileChecked,
-        currentSegment: segments[0],
-        segmentsLength: segments.length,
-      });
+    // Mark as ready and hide splash screen first
+    if (!isReady) {
+      setIsReady(true);
+      SplashScreen.hideAsync();
     }
-
-    // Get current route info
-    const currentSegment = segments[0];
-    const inAuthGroup = currentSegment === 'login';
-    const inAuthCallback = currentSegment === 'auth'; // Handle auth/callback route
-    const inOnboarding = currentSegment === 'onboarding';
-    const inTabs = currentSegment === '(tabs)';
-    const onIndex = currentSegment === undefined || currentSegment === 'index';
-
-    // Don't redirect if we're in the auth callback - let it complete
-    if (inAuthCallback) {
-      return;
-    }
-
-    // Helper function to navigate after ensuring Stack is mounted
-    const performNavigation = () => {
-      if (!session) {
-        // No session - redirect to login (unless already there)
-        if (!inAuthGroup) {
-          router.replace('/login');
-        }
-      } else {
-        // Has session
-        if (inAuthGroup) {
-          // On login page but authenticated - check onboarding
-          if (!onboarding.completed || !user) {
-            router.replace('/onboarding');
-          } else {
-            router.replace('/(tabs)');
-          }
-        } else if (onIndex || (!inOnboarding && !inTabs && currentSegment !== 'active-workout' && currentSegment !== 'symmetry-history')) {
-          // On index or other route - redirect based on onboarding
-          if (!onboarding.completed || !user) {
-            router.replace('/onboarding');
-          } else {
-            router.replace('/(tabs)');
-          }
-        }
-      }
-
-      // Mark as ready and hide splash screen
-      if (!isReady) {
-        setIsReady(true);
-        SplashScreen.hideAsync();
-      }
-    };
-
-    // If on index route (undefined segment), defer navigation to next tick to ensure Stack is mounted
-    if (currentSegment === undefined) {
-      const timer = setTimeout(performNavigation, 100);
-      return () => clearTimeout(timer);
-    } else {
-      // Already on a specific route, navigate immediately
-      performNavigation();
-    }
-  }, [session, isAuthLoading, isProfileLoading, profileChecked, segments, user, onboarding.completed, isReady]);
+  }, [session, isAuthLoading, isProfileLoading, profileChecked, isReady]);
 
   // Show loading while checking auth or loading profile
   if (isAuthLoading || isProfileLoading) {
@@ -332,6 +353,112 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   return <>{children}</>;
+}
+
+/**
+ * Navigation Guard Component
+ * 
+ * Handles navigation after the Stack is mounted.
+ * This component is rendered INSIDE the Stack, ensuring navigation is safe.
+ */
+function NavigationGuard() {
+  const router = useRouter();
+  const segments = useSegments();
+  const rootNavigationState = useRootNavigationState();
+  
+  // Get user and onboarding state from store
+  const user = useAppStore((s) => s.user);
+  const onboarding = useAppStore((s) => s.onboarding);
+  
+  // Track session state for navigation decisions
+  const [hasSession, setHasSession] = useState(false);
+  
+  // Check for active Supabase session
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setHasSession(!!session);
+    });
+    
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setHasSession(!!session);
+    });
+    
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Check if navigation is ready
+  const navigationReady = rootNavigationState?.key != null;
+
+  useEffect(() => {
+    if (!navigationReady) {
+      if (__DEV__) {
+        console.log('🧭 Waiting for navigation to be ready...');
+      }
+      return;
+    }
+
+    if (__DEV__) {
+      console.log('🧭 Navigation check:', {
+        hasSession,
+        hasUser: !!user,
+        onboardingCompleted: onboarding.completed,
+        currentSegment: segments[0],
+        segmentsLength: segments.length,
+      });
+    }
+
+    // Get current route info
+    const currentSegment = segments[0];
+    const inAuthGroup = currentSegment === 'login';
+    const inAuthCallback = currentSegment === 'auth';
+    const inOnboarding = currentSegment === 'onboarding';
+    const inTabs = currentSegment === '(tabs)';
+    const onIndex = currentSegment === 'index' || currentSegment === undefined;
+
+    // Don't redirect if we're in the auth callback
+    if (inAuthCallback) {
+      return;
+    }
+
+    // Navigation logic based on session and user profile
+    if (hasSession) {
+      // User is authenticated with Supabase
+      if (user) {
+        // Has profile - go to tabs (or onboarding if not completed)
+        if (inAuthGroup || onIndex) {
+          if (!onboarding.completed) {
+            if (__DEV__) {
+              console.log('🧭 Redirecting to onboarding (has user, not completed)');
+            }
+            router.replace('/onboarding');
+          } else {
+            if (__DEV__) {
+              console.log('🧭 Redirecting to tabs (has user, completed)');
+            }
+            router.replace('/(tabs)');
+          }
+        }
+      } else {
+        // Has session but no profile - needs onboarding (first-time user)
+        if (!inOnboarding) {
+          if (__DEV__) {
+            console.log('🧭 Redirecting to onboarding (has session, no profile)');
+          }
+          router.replace('/onboarding');
+        }
+      }
+    } else {
+      // No session - needs login
+      if (!inAuthGroup && (onIndex || inOnboarding)) {
+        if (__DEV__) {
+          console.log('🧭 Redirecting to login (no session)');
+        }
+        router.replace('/login');
+      }
+    }
+  }, [navigationReady, segments, user, onboarding.completed, router, hasSession]);
+
+  return null; // This component just handles navigation, doesn't render anything
 }
 
 /**
@@ -416,6 +543,7 @@ export default function RootLayout() {
             <Stack.Screen name="login" options={{ headerShown: false }} />
             <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
             <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+            <Stack.Screen name="workout-builder" options={{ headerShown: false }} />
             <Stack.Screen name="symmetry-history" 
               options={{ 
                 headerShown: false,
@@ -432,6 +560,7 @@ export default function RootLayout() {
               }}
             />
           </Stack>
+          <NavigationGuard />
         </DataInitializer>
       </AuthProvider>
     </SafeAreaProvider>

@@ -166,7 +166,7 @@ serve(async (req) => {
       
       if (tokens.access_token) {
         // Try Expo Go deep link first
-        const expoUrl = 'exp://192.168.68.104:8081/--/auth/callback#' + window.location.hash.substring(1);
+        const expoUrl = 'exp://192.168.68.113:8081/--/auth/callback#' + window.location.hash.substring(1);
         
         // Also try the custom scheme
         const symmetryUrl = 'symmetry://auth/callback#' + window.location.hash.substring(1);

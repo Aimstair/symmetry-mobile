@@ -128,20 +128,14 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
 export function useProgressDataInitialization(userId: string | null) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isLoaded, setIsLoaded] = useState(false);
 
-  // Get current store state to check if data is already loaded
-  const bodyMeasurements = useAppStore((s) => s.bodyMeasurements);
-  const physiqueScans = useAppStore((s) => s.physiqueScans);
-  const cardioLogs = useAppStore((s) => s.cardioLogs);
-
-  // We'll add these to the store
-  const addBodyMeasurement = useAppStore((s) => s.addBodyMeasurement);
-  const addPhysiqueScan = useAppStore((s) => s.addPhysiqueScan);
-  const addCardioLog = useAppStore((s) => s.addCardioLog);
+  // Use the bulk set methods instead of individual add methods
+  const setBodyMeasurements = useAppStore((s) => s.setBodyMeasurements);
+  const setPhysiqueScans = useAppStore((s) => s.setPhysiqueScans);
+  const setCardioLogs = useAppStore((s) => s.setCardioLogs);
 
   const loadProgressData = useCallback(async () => {
-    if (!userId || isLoaded) return;
+    if (!userId) return;
 
     setIsLoading(true);
     setError(null);
@@ -153,29 +147,11 @@ export function useProgressDataInitialization(userId: string | null) {
         dataService.progress.getCardioLogs(userId),
       ]);
 
-      // Add each item to store (avoiding duplicates)
-      const existingMeasurementIds = new Set(bodyMeasurements.map((m) => m.id));
-      measurements.forEach((m) => {
-        if (!existingMeasurementIds.has(m.id)) {
-          addBodyMeasurement(m);
-        }
-      });
+      // Set all data at once (replacing existing data with fresh data from server)
+      setBodyMeasurements(measurements);
+      setPhysiqueScans(scans);
+      setCardioLogs(cardio);
 
-      const existingScanIds = new Set(physiqueScans.map((s) => s.id));
-      scans.forEach((s) => {
-        if (!existingScanIds.has(s.id)) {
-          addPhysiqueScan(s);
-        }
-      });
-
-      const existingCardioIds = new Set(cardioLogs.map((c) => c.id));
-      cardio.forEach((c) => {
-        if (!existingCardioIds.has(c.id)) {
-          addCardioLog(c);
-        }
-      });
-
-      setIsLoaded(true);
       if (__DEV__) {
         console.log('✅ Progress data loaded:', {
           measurements: measurements.length,
@@ -192,19 +168,14 @@ export function useProgressDataInitialization(userId: string | null) {
     }
   }, [
     userId,
-    isLoaded,
-    bodyMeasurements,
-    physiqueScans,
-    cardioLogs,
-    addBodyMeasurement,
-    addPhysiqueScan,
-    addCardioLog,
+    setBodyMeasurements,
+    setPhysiqueScans,
+    setCardioLogs,
   ]);
 
   return {
     isLoading,
     error,
-    isLoaded,
     loadProgressData,
   };
 }

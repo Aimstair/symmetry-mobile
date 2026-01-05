@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Animated, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Animated, ActivityIndicator, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Crypto from 'expo-crypto';
@@ -8,6 +8,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
+import { generatePlanFromScan } from '@/utils/aiPlanner';
 import Svg, { Ellipse, Line, Path, Rect, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { 
   Camera, 
@@ -70,6 +71,8 @@ export default function PhysiqueScan() {
   const user = useAppStore((s) => s.user);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const syncAddPhysiqueScan = useAppStore((s) => s.syncAddPhysiqueScan);
+  const syncWorkoutPlanToCloud = useAppStore((s) => s.syncWorkoutPlanToCloud);
+  const addWorkoutPlan = useAppStore((s) => s.addWorkoutPlan);
   const isLoading = useAppStore((s) => s.isLoading);
 
   // Load progress data on focus
@@ -170,6 +173,33 @@ export default function PhysiqueScan() {
           try {
             const savedScan = await syncAddPhysiqueScan(newScan);
             setCurrentScanResult(savedScan);
+
+            // Generate AI workout plan from scan results
+            if (user) {
+              try {
+                const aiPlan = generatePlanFromScan(savedScan, new Date(), {
+                  user,
+                  lackingThreshold: 70,
+                });
+
+                await syncWorkoutPlanToCloud(aiPlan);
+                addWorkoutPlan(aiPlan);
+
+                console.log('✅ AI workout plan generated and saved:', aiPlan.id);
+
+                // Show success message
+                setTimeout(() => {
+                  Alert.alert(
+                    'Workout Plan Generated!',
+                    'A new workout plan has been created based on your scan results. Check the Workout Plan tab to view it.',
+                    [{ text: 'OK' }]
+                  );
+                }, 1000);
+              } catch (planError) {
+                console.error('❌ Failed to generate AI plan:', planError);
+                // Still show scan results even if plan generation fails
+              }
+            }
           } catch (error) {
             console.error('Failed to save scan:', error);
             setCurrentScanResult(newScan); // Still show results even if save failed

@@ -55,7 +55,7 @@ export default function Login() {
       const isExpoGo = !Constants.appOwnership || Constants.appOwnership === 'expo';
       
       // Get the Supabase URL from environment
-      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || 'http://192.168.68.104.nip.io:54321';
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || 'http://192.168.68.113.nip.io:54321';
       
       // In development/Expo Go, use an Edge Function to handle the OAuth callback
       // This displays a nice page that can redirect back to the app

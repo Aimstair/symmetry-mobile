@@ -64,7 +64,7 @@
     },
     "scheme": "symmetry",
     "extra": {
-      "supabaseUrl": "http://192.168.68.104.nip.io:54321",
+      "supabaseUrl": "http://192.168.68.113.nip.io:54321",
       "supabaseAnonKey": "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH",
       "router": {
         "origin": false

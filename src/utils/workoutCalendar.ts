@@ -11,7 +11,7 @@ import type { WorkoutPlan, WorkoutDay } from '@/types';
 /**
  * Day status for calendar display
  */
-export type DayStatus = 'completed' | 'today' | 'upcoming' | 'rest' | 'skipped';
+export type DayStatus = 'completed' | 'today' | 'upcoming' | 'rest' | 'skipped' | 'no-workout';
 
 /**
  * Calendar day representation for UI
@@ -20,12 +20,13 @@ export interface CalendarDay {
   day: string; // 'Mon', 'Tue', etc.
   date: number; // Day of month (1-31)
   fullDate: Date; // Full date object
-  name: string; // 'Push Day', 'Rest', etc.
+  name: string; // 'Push Day', 'Rest', 'No Workout', etc.
   muscles: string[]; // ['Chest', 'Shoulders', 'Triceps']
   status: DayStatus;
   exercises: number; // Number of exercises
   workoutDay: WorkoutDay | null; // Reference to the workout day template
   isRestDay: boolean;
+  isTrainingDay: boolean; // Whether user designated this as a training day
 }
 
 /**
@@ -119,51 +120,49 @@ export function getDayStatus(
  * Map a workout plan to a week's calendar view
  * 
  * Strategy:
- * 1. Get the workout plan's workoutDays (the template)
- * 2. Map each calendar day to the appropriate workout day based on sequence
- * 3. Account for rest days (when no workout is scheduled)
+ * 1. Use trainingDays from user to determine which days are training days
+ * 2. Map each calendar training day to the appropriate workout day based on sequence
+ * 3. Training days without a workout show "No Workout Planned"
+ * 4. Non-training days are rest days
  * 
- * @param plan - The workout plan template
+ * @param plan - The workout plan template (can be null)
  * @param weekStart - The Monday of the week to generate
+ * @param trainingDays - User's selected training days (e.g., ['Monday', 'Wednesday', 'Friday'])
  * @param completedDates - Set of ISO date strings for completed workouts
  */
 export function mapWorkoutPlanToWeek(
   plan: WorkoutPlan | null,
   weekStart: Date,
+  trainingDays: string[] = [],
   completedDates?: Set<string>
 ): CalendarDay[] {
   const today = new Date();
   const weekDates = getWeekDates(weekStart);
   
-  // If no plan, return all rest days
-  if (!plan || !plan.workoutDays || plan.workoutDays.length === 0) {
-    return weekDates.map((date) => ({
-      day: getDayName(date),
-      date: date.getDate(),
-      fullDate: date,
-      name: 'Rest',
-      muscles: [],
-      status: 'rest',
-      exercises: 0,
-      workoutDay: null,
-      isRestDay: true,
-    }));
-  }
-
-  const { workoutDays, daysPerWeek } = plan;
+  // Map day names to day of week index for matching
+  const trainingDaySet = new Set(trainingDays.map(d => d.toLowerCase()));
   
-  // Create a simple mapping: distribute workout days across the week
-  // For a 4-day plan: Mon, Tue, Thu, Fri (with Wed, Sat, Sun as rest)
-  // For a 6-day plan: Mon-Sat workout, Sun rest
-  // For a 3-day plan: Mon, Wed, Fri
-  const workoutSchedule = getWorkoutSchedule(daysPerWeek);
+  // Get workout days from plan (if exists)
+  const workoutDays = plan?.workoutDays || [];
   
-  return weekDates.map((date, dayIndex) => {
-    const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, etc.
-    const scheduleIndex = workoutSchedule[dayOfWeek];
+  // Create a map of dayName -> WorkoutDay for O(1) lookup
+  const workoutDayByDayName = new Map<string, typeof workoutDays[0]>();
+  workoutDays.forEach(wd => {
+    if (wd.dayName) {
+      workoutDayByDayName.set(wd.dayName.toLowerCase(), wd);
+    }
+  });
+  
+  // Fallback: workouts without dayName (legacy) - assign sequentially to training days
+  const unassignedWorkouts = workoutDays.filter(wd => !wd.dayName);
+  let unassignedIndex = 0;
+  
+  return weekDates.map((date) => {
+    const dayName = getFullDayName(date);
+    const isTrainingDay = trainingDaySet.has(dayName.toLowerCase());
     
-    if (scheduleIndex === null || scheduleIndex >= workoutDays.length) {
-      // Rest day
+    if (!isTrainingDay) {
+      // Rest day (user didn't select this day for training)
       return {
         day: getDayName(date),
         date: date.getDate(),
@@ -174,10 +173,35 @@ export function mapWorkoutPlanToWeek(
         exercises: 0,
         workoutDay: null,
         isRestDay: true,
+        isTrainingDay: false,
       };
     }
     
-    const workoutDay = workoutDays[scheduleIndex];
+    // This is a training day - find the matching workout
+    // First try to match by dayName
+    let workoutDay = workoutDayByDayName.get(dayName.toLowerCase()) || null;
+    
+    // Fallback: use unassigned workouts sequentially (for legacy data)
+    if (!workoutDay && unassignedWorkouts.length > 0 && unassignedIndex < unassignedWorkouts.length) {
+      workoutDay = unassignedWorkouts[unassignedIndex];
+      unassignedIndex++;
+    }
+    
+    if (!workoutDay) {
+      // Training day but no workout scheduled
+      return {
+        day: getDayName(date),
+        date: date.getDate(),
+        fullDate: date,
+        name: 'No Workout',
+        muscles: [],
+        status: isSameDay(date, today) ? 'today' : isBeforeToday(date, today) ? 'skipped' : 'no-workout',
+        exercises: 0,
+        workoutDay: null,
+        isRestDay: false,
+        isTrainingDay: true,
+      };
+    }
     
     return {
       day: getDayName(date),
@@ -189,34 +213,18 @@ export function mapWorkoutPlanToWeek(
       exercises: workoutDay.exercises?.length || 0,
       workoutDay,
       isRestDay: false,
+      isTrainingDay: true,
     };
   });
 }
 
 /**
- * Get workout schedule mapping: day of week (0-6) to workout day index
- * null means rest day
+ * Get full day name from date
  */
-function getWorkoutSchedule(daysPerWeek: number): (number | null)[] {
-  // Index: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-  switch (daysPerWeek) {
-    case 1:
-      return [null, 0, null, null, null, null, null]; // Monday only
-    case 2:
-      return [null, 0, null, null, 1, null, null]; // Mon, Thu
-    case 3:
-      return [null, 0, null, 1, null, 2, null]; // Mon, Wed, Fri
-    case 4:
-      return [null, 0, 1, null, 2, 3, null]; // Mon, Tue, Thu, Fri
-    case 5:
-      return [null, 0, 1, 2, 3, 4, null]; // Mon-Fri
-    case 6:
-      return [null, 0, 1, 2, 3, 4, 5]; // Mon-Sat
-    case 7:
-      return [6, 0, 1, 2, 3, 4, 5]; // Every day (Sun=day7)
-    default:
-      return [null, 0, 1, null, 2, 3, null]; // Default 4-day
-  }
+const FULL_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+export function getFullDayName(date: Date): string {
+  return FULL_DAY_NAMES[date.getDay()];
 }
 
 /**
@@ -224,11 +232,12 @@ function getWorkoutSchedule(daysPerWeek: number): (number | null)[] {
  */
 export function getCurrentWeekCalendar(
   plan: WorkoutPlan | null,
+  trainingDays: string[] = [],
   completedDates?: Set<string>
 ): CalendarDay[] {
   const today = new Date();
   const weekStart = getWeekStart(today);
-  return mapWorkoutPlanToWeek(plan, weekStart, completedDates);
+  return mapWorkoutPlanToWeek(plan, weekStart, trainingDays, completedDates);
 }
 
 /**

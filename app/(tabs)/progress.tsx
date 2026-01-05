@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { GestureDetector, GestureHandlerRootView, Pressable } from 'react-native-gesture-handler';
 import { ExerciseHistorySheet } from '@/components/ui/workout/ExerciseHistorySheet';
+import { TapeMeasurementModal, CardioLogModal, LogWeightModal } from '@/components/ui/progress';
 import { useAppStore } from '@/store/useAppStore';
 import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
 import { 
@@ -26,7 +27,8 @@ import {
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
-import type { BodyMeasurement, PhysiqueScan, CardioLog } from '@/types';
+import { dataService } from '@/services/dataServiceProvider';
+import type { BodyMeasurement, PhysiqueScan, CardioLog, CatalogExercise } from '@/types';
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64; // Account for padding
@@ -130,6 +132,14 @@ export default function Progress() {
   const [showExerciseHistory, setShowExerciseHistory] = useState(false);
   const [weightInput, setWeightInput] = useState('');
   
+  // Modal states
+  const [showLogWeightModal, setShowLogWeightModal] = useState(false);
+  const [showTapeMeasurementModal, setShowTapeMeasurementModal] = useState(false);
+  const [showCardioLogModal, setShowCardioLogModal] = useState(false);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [catalogExercises, setCatalogExercises] = useState<CatalogExercise[]>([]);
+  const [isLoadingExercises, setIsLoadingExercises] = useState(false);
+  
   const headerAnim = useRef(new Animated.Value(0)).current;
   const contentAnim = useRef(new Animated.Value(0)).current;
 
@@ -145,6 +155,32 @@ export default function Progress() {
 
   // Load progress data on tab focus
   const { isLoading: isProgressLoading, loadProgressData } = useProgressDataInitialization(user?.id ?? null);
+
+  // Initial data load on mount (fixes black screen on first load)
+  useEffect(() => {
+    if (user?.id && !initialLoadDone) {
+      loadProgressData().then(() => {
+        setInitialLoadDone(true);
+      });
+    }
+  }, [user?.id, initialLoadDone, loadProgressData]);
+
+  // Load exercises when switching to the Exercises tab
+  useEffect(() => {
+    if (activeTab === 'exercises' && catalogExercises.length === 0 && !isLoadingExercises) {
+      setIsLoadingExercises(true);
+      dataService.exercise.getExercises()
+        .then((exercises) => {
+          setCatalogExercises(exercises);
+        })
+        .catch((error) => {
+          console.error('Failed to load exercises:', error);
+        })
+        .finally(() => {
+          setIsLoadingExercises(false);
+        });
+    }
+  }, [activeTab, catalogExercises.length, isLoadingExercises]);
 
   // Load progress data when this screen comes into focus
   useFocusEffect(
@@ -209,6 +245,7 @@ export default function Progress() {
 
   // Exercise stats type for the Exercises tab
   interface ExerciseStat {
+    id: string;
     name: string;
     muscle: string;
     pr: number;
@@ -217,11 +254,19 @@ export default function Progress() {
     trend: 'up' | 'down' | 'stable';
   }
 
-  // Placeholder exercise stats - will be populated from workout history
+  // Transform catalog exercises to exercise stats
+  // In the future, this should merge with workout history data
   const exerciseStats = useMemo((): ExerciseStat[] => {
-    // TODO: Derive from workout history when available
-    return [];
-  }, []);
+    return catalogExercises.map((exercise) => ({
+      id: exercise.id,
+      name: exercise.name,
+      muscle: exercise.muscleGroups[0] || 'General',
+      pr: 0, // TODO: Get from workout history
+      lastWeight: 0, // TODO: Get from workout history
+      sessions: 0, // TODO: Count from workout history
+      trend: 'stable' as const,
+    }));
+  }, [catalogExercises]);
 
   // Filter and sort exercises
   const filteredExercises = exerciseStats
@@ -251,8 +296,8 @@ export default function Progress() {
     return { value: Math.abs(delta).toFixed(1), isPositive };
   };
 
-  // Show loading state
-  if (isProgressLoading && !bodyMeasurements.length) {
+  // Show loading state only on initial load (not on subsequent refreshes)
+  if (!initialLoadDone && isProgressLoading) {
     return (
       <SafeAreaView edges={['top']} className="flex-1 bg-background">
         <View className="flex-1 items-center justify-center">
@@ -498,38 +543,48 @@ export default function Progress() {
 
                 {/* Exercise List */}
                 <View className="gap-2">
-                  {filteredExercises.map((exercise, i) => (
-                    <GestureHandlerRootView>
-                    <Pressable
-                      key={exercise.name}
-                      onPress={() => {
-                        setSelectedExerciseId(exercise.name.toLowerCase().replace(/\s+/g, '-'));
-                        setShowExerciseHistory(true);
-                      }}
-                    >
-                      <GlassCard className="flex-row items-center justify-between">
-                      <View className="flex-row items-center gap-3 flex-1">
-                        <View className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center">
-                          <Dumbbell size={20} color="#31D5E3" />
-                        </View>
-                        <View className="flex-1">
-                          <Text className="font-medium text-foreground">{exercise.name}</Text>
-                          <Text className="text-xs text-muted-foreground">{exercise.muscle}</Text>
-                        </View>
-                      </View>
-                      <View className="items-end">
-                        <Text className="font-bold text-foreground">{exercise.lastWeight} lbs</Text>
-                        <View className="flex-row items-center gap-1">
-                          <Text className="text-xs text-muted-foreground">PR: {exercise.pr} lbs</Text>
-                          {exercise.trend === 'up' && <TrendingUp size={12} color="#4ADE80" />}
-                        </View>
-                      </View>
-                    </GlassCard>
-                    </Pressable>
-                    </GestureHandlerRootView>
-                  ))}
+                  {isLoadingExercises ? (
+                    <View className="items-center py-8">
+                      <ActivityIndicator size="large" color="#31D5E3" />
+                      <Text className="text-muted-foreground mt-2">Loading exercises...</Text>
+                    </View>
+                  ) : (
+                    <>
+                      {filteredExercises.map((exercise) => (
+                        <GestureHandlerRootView key={exercise.id}>
+                          <Pressable
+                            onPress={() => {
+                              setSelectedExerciseId(exercise.id);
+                              setShowExerciseHistory(true);
+                            }}
+                          >
+                            <GlassCard className="flex-row items-center justify-between">
+                              <View className="flex-row items-center gap-3 flex-1">
+                                <View className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center">
+                                  <Dumbbell size={20} color="#31D5E3" />
+                                </View>
+                                <View className="flex-1">
+                                  <Text className="font-medium text-foreground">{exercise.name}</Text>
+                                  <Text className="text-xs text-muted-foreground">{exercise.muscle}</Text>
+                                </View>
+                              </View>
+                              {exercise.sessions > 0 && (
+                                <View className="items-end">
+                                  <Text className="font-bold text-foreground">{exercise.lastWeight} lbs</Text>
+                                  <View className="flex-row items-center gap-1">
+                                    <Text className="text-xs text-muted-foreground">PR: {exercise.pr} lbs</Text>
+                                    {exercise.trend === 'up' && <TrendingUp size={12} color="#4ADE80" />}
+                                  </View>
+                                </View>
+                              )}
+                            </GlassCard>
+                          </Pressable>
+                        </GestureHandlerRootView>
+                      ))}
+                    </>
+                  )}
                   
-                  {filteredExercises.length === 0 && (
+                  {!isLoadingExercises && filteredExercises.length === 0 && (
                     <View className="items-center py-8">
                       <Dumbbell size={32} color="#71717A" style={{ opacity: 0.5 }} />
                       <Text className="text-muted-foreground mt-2">No exercises found</Text>
@@ -555,7 +610,7 @@ export default function Progress() {
                     <Ruler size={20} color="#31D5E3" />
                     <Text className="text-lg font-semibold text-foreground">Tape Measurements</Text>
                   </View>
-                  <Button size="sm" variant="outline">
+                  <Button size="sm" variant="outline" onPress={() => setShowTapeMeasurementModal(true)}>
                     <Plus size={16} color="#31D5E3" />
                     <Text className="text-foreground ml-1">Log</Text>
                   </Button>
@@ -613,6 +668,10 @@ export default function Progress() {
                     <Scale size={20} color="#31D5E3" />
                     <Text className="text-lg font-semibold text-foreground">Log Weight</Text>
                   </View>
+                  <Button size="sm" variant="outline" onPress={() => setShowLogWeightModal(true)}>
+                    <Plus size={16} color="#31D5E3" />
+                    <Text className="text-foreground ml-1">Log</Text>
+                  </Button>
                 </View>
                 <GlassCard>
                   <View className="flex-row gap-3">
@@ -649,7 +708,7 @@ export default function Progress() {
                     <Activity size={20} color="#31D5E3" />
                     <Text className="text-lg font-semibold text-foreground">Cardio Log</Text>
                   </View>
-                  <Button size="sm" variant="outline">
+                  <Button size="sm" variant="outline" onPress={() => setShowCardioLogModal(true)}>
                     <Plus size={16} color="#31D5E3" />
                     <Text className="text-foreground ml-1">Add</Text>
                   </Button>
@@ -723,6 +782,20 @@ export default function Progress() {
           </Animated.View>
         </View>
       </ScrollView>
+
+      {/* Modals */}
+      <LogWeightModal 
+        open={showLogWeightModal} 
+        onOpenChange={setShowLogWeightModal} 
+      />
+      <TapeMeasurementModal 
+        open={showTapeMeasurementModal} 
+        onOpenChange={setShowTapeMeasurementModal} 
+      />
+      <CardioLogModal 
+        open={showCardioLogModal} 
+        onOpenChange={setShowCardioLogModal} 
+      />
     </SafeAreaView>
   );
 }

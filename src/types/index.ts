@@ -24,6 +24,7 @@ export interface User {
   weight: number; // Always stored in kg
   goal: 'bulk' | 'cut' | 'recomp' | 'maintenance';
   experienceLevel: 'beginner' | 'intermediate' | 'advanced';
+  trainingDays: string[]; // e.g., ['Monday', 'Wednesday', 'Friday']
   createdAt: Date;
   updatedAt: Date;
 }
@@ -115,6 +116,7 @@ export interface WorkoutDay {
   planId: string;
   orderIndex: number;
   name: string;
+  dayName?: string; // Day of week this workout belongs to (e.g., 'Monday', 'Tuesday')
   muscleGroups: string[];
   exercises: PlanExercise[];
   createdAt: Date;

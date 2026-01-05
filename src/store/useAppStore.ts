@@ -7,6 +7,7 @@ import type {
   NutritionTargets,
   EquipmentProfile,
   WorkoutPlan,
+  WorkoutDay,
   BodyMeasurement,
   PhysiqueScan,
   CardioLog,
@@ -61,6 +62,9 @@ interface AppState {
   addWorkoutPlan: (plan: WorkoutPlan) => void;
   updateWorkoutPlan: (id: string, updates: Partial<WorkoutPlan>) => void;
   deleteWorkoutPlan: (id: string) => void;
+  swapExercise: (planId: string, dayId: string, exerciseId: string, newExerciseId: string) => void;
+  addWorkoutDay: (planId: string, workoutDay: WorkoutDay) => void;
+  removeWorkoutDay: (planId: string, dayId: string) => void;
   startWorkout: (workoutId: string) => void;
   endWorkout: () => void;
   toggleWarmupMode: () => void;
@@ -98,6 +102,9 @@ interface AppState {
   syncWorkoutPlanToCloud: (plan: WorkoutPlan) => Promise<WorkoutPlan>;
   syncUpdateWorkoutPlanToCloud: (id: string, updates: Partial<WorkoutPlan>) => Promise<WorkoutPlan>;
   syncDeleteWorkoutPlanFromCloud: (id: string) => Promise<void>;
+  syncSwapExerciseToCloud: (planId: string, dayId: string, exerciseId: string, newExerciseId: string) => Promise<void>;
+  syncAddWorkoutDayToCloud: (planId: string, workoutDay: WorkoutDay) => Promise<WorkoutDay>;
+  syncRemoveWorkoutDayFromCloud: (planId: string, dayId: string) => Promise<void>;
   syncUserToCloud: (user: User) => Promise<User>;
   syncUpdateUserToCloud: (userId: string, updates: Partial<User>) => Promise<User>;
   
@@ -130,6 +137,7 @@ const initialOnboarding: OnboardingData = {
 const initialActiveWorkout: ActiveWorkoutState = {
   isActive: false,
   workoutId: null,
+  sessionId: null,
   startTime: null,
   currentExerciseIndex: 0,
   warmupMode: false,
@@ -139,6 +147,7 @@ const initialActiveWorkout: ActiveWorkoutState = {
     targetSeconds: 90,
     elapsedSeconds: 0,
   },
+  exerciseSets: {},
 };
 
 export const useAppStore = create<AppState>()(
@@ -183,6 +192,77 @@ export const useAppStore = create<AppState>()(
       deleteWorkoutPlan: (id) =>
         set((state) => ({
           workoutPlans: state.workoutPlans.filter((p) => p.id !== id),
+        })),
+      swapExercise: (planId, dayId, exerciseId, newExerciseId) =>
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((plan) => {
+            if (plan.id !== planId) return plan;
+            return {
+              ...plan,
+              workoutDays: plan.workoutDays.map((day) => {
+                if (day.id !== dayId) return day;
+                return {
+                  ...day,
+                  exercises: day.exercises.map((ex) => {
+                    if (ex.id !== exerciseId) return ex;
+                    return {
+                      ...ex,
+                      exerciseId: newExerciseId,
+                      // Clear hydrated exercise so it gets re-fetched
+                      exercise: undefined,
+                    };
+                  }),
+                };
+              }),
+            };
+          }),
+        })),
+      addWorkoutDay: (planId, workoutDay) =>
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((plan) => {
+            if (plan.id !== planId) return plan;
+            
+            // Add the new day and re-sort by day order
+            const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const updatedDays = [...plan.workoutDays, workoutDay];
+            
+            // Sort by day of week extracted from name
+            updatedDays.sort((a, b) => {
+              const dayA = a.name.split(' - ')[0];
+              const dayB = b.name.split(' - ')[0];
+              return dayOrder.indexOf(dayA) - dayOrder.indexOf(dayB);
+            });
+            
+            // Re-index
+            updatedDays.forEach((day, idx) => {
+              day.orderIndex = idx;
+            });
+            
+            return {
+              ...plan,
+              workoutDays: updatedDays,
+              updatedAt: new Date(),
+            };
+          }),
+        })),
+      removeWorkoutDay: (planId, dayId) =>
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((plan) => {
+            if (plan.id !== planId) return plan;
+            
+            const updatedDays = plan.workoutDays.filter((day) => day.id !== dayId);
+            
+            // Re-index
+            updatedDays.forEach((day, idx) => {
+              day.orderIndex = idx;
+            });
+            
+            return {
+              ...plan,
+              workoutDays: updatedDays,
+              updatedAt: new Date(),
+            };
+          }),
         })),
       startWorkout: (workoutId) =>
         set({
@@ -374,6 +454,70 @@ export const useAppStore = create<AppState>()(
         }
       },
 
+      syncSwapExerciseToCloud: async (planId, dayId, exerciseId, newExerciseId) => {
+        set({ isLoading: true, loadingMessage: 'Swapping exercise...' });
+        try {
+          // Update local state first
+          get().swapExercise(planId, dayId, exerciseId, newExerciseId);
+          
+          // Get the updated plan and sync to cloud
+          const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
+          if (updatedPlan) {
+            await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
+          }
+          
+          set({ isLoading: false, loadingMessage: null });
+          if (__DEV__) console.log('✅ Exercise swapped:', exerciseId, '->', newExerciseId);
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to swap exercise:', error);
+          throw error;
+        }
+      },
+
+      syncAddWorkoutDayToCloud: async (planId, workoutDay) => {
+        set({ isLoading: true, loadingMessage: 'Adding workout day...' });
+        try {
+          // Update local state first
+          get().addWorkoutDay(planId, workoutDay);
+          
+          // Get the updated plan and sync to cloud
+          const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
+          if (updatedPlan) {
+            await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
+          }
+          
+          set({ isLoading: false, loadingMessage: null });
+          if (__DEV__) console.log('✅ Workout day added:', workoutDay.name);
+          return workoutDay;
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to add workout day:', error);
+          throw error;
+        }
+      },
+
+      syncRemoveWorkoutDayFromCloud: async (planId, dayId) => {
+        set({ isLoading: true, loadingMessage: 'Removing workout day...' });
+        try {
+          // Update local state first
+          get().removeWorkoutDay(planId, dayId);
+          
+          // Get the updated plan and sync to cloud
+          const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
+          if (updatedPlan) {
+            await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
+          }
+          
+          set({ isLoading: false, loadingMessage: null });
+          if (__DEV__) console.log('✅ Workout day removed:', dayId);
+        } catch (error) {
+          set({ isLoading: false, loadingMessage: null });
+          console.error('❌ Failed to remove workout day:', error);
+          throw error;
+        }
+      },
+
       syncUserToCloud: async (user) => {
         set({ isLoading: true, loadingMessage: 'Creating profile...' });
         try {
@@ -396,8 +540,34 @@ export const useAppStore = create<AppState>()(
         set({ isLoading: true, loadingMessage: 'Updating profile...' });
         try {
           const updatedUser = await dataService.user.updateUser(userId, updates);
+          
+          // **FIX: Immediately update local store to ensure UI refresh**
           set({
             user: updatedUser,
+          });
+          
+          // Auto-insert weight history when weight is updated
+          if (updates.weight !== undefined) {
+            try {
+              const weightMeasurement: BodyMeasurement = {
+                id: `bm-weight-${Date.now()}`,
+                userId,
+                date: new Date(),
+                weight: updates.weight,
+                measurements: {},
+              };
+              const savedMeasurement = await dataService.progress.addBodyMeasurement(weightMeasurement);
+              set((state) => ({
+                bodyMeasurements: [...state.bodyMeasurements, savedMeasurement],
+              }));
+              if (__DEV__) console.log('✅ Weight history auto-logged:', updates.weight);
+            } catch (weightError) {
+              // Don't fail the whole update if weight logging fails
+              console.error('⚠️ Failed to auto-log weight history:', weightError);
+            }
+          }
+          
+          set({
             isLoading: false,
             loadingMessage: null,
           });

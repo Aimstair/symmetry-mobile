@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { View, Text, Modal, Pressable, ScrollView, TextInput } from 'react-native';
+import { useState, useEffect } from 'react';
+import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator } from 'react-native';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import {
@@ -15,6 +15,8 @@ import {
   X,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+import { dataService } from '@/services/dataServiceProvider';
+import type { CatalogExercise } from '@/types';
 
 interface SetData {
   id: number;
@@ -37,83 +39,6 @@ interface ExerciseData {
   supersetId?: string;
   notes?: string;
 }
-
-// Mock exercise details database
-const exerciseDetails: Record<string, {
-  description: string;
-  muscleGroups: string[];
-  tips: string[];
-  formCues: string[];
-  videoPlaceholder: string;
-  alternatives: { id: string; name: string; reason: string }[];
-}> = {
-  '1': {
-    description: 'The barbell bench press is a compound movement that primarily targets the chest, with secondary involvement of the shoulders and triceps.',
-    muscleGroups: ['Chest', 'Front Delts', 'Triceps'],
-    tips: [
-      'Keep your feet flat on the floor for stability',
-      'Retract and depress your shoulder blades',
-      'Lower the bar to your mid-chest with control',
-      'Drive through your feet as you press up',
-    ],
-    formCues: [
-      'Grip: Slightly wider than shoulder-width',
-      'Arch: Maintain natural spine arch',
-      'Elbows: 45-75° angle from torso',
-      'Touch: Bar touches mid-chest',
-    ],
-    videoPlaceholder: 'bench-press',
-    alternatives: [
-      { id: 'alt1', name: 'Dumbbell Bench Press', reason: 'No barbell available' },
-      { id: 'alt2', name: 'Push-ups', reason: 'Bodyweight alternative' },
-      { id: 'alt3', name: 'Machine Chest Press', reason: 'Easier setup' },
-    ],
-  },
-  '2': {
-    description: 'The incline dumbbell press targets the upper portion of the chest while also engaging the shoulders and triceps.',
-    muscleGroups: ['Upper Chest', 'Front Delts', 'Triceps'],
-    tips: [
-      'Set bench to 30-45 degree angle',
-      'Keep dumbbells in line with upper chest',
-      'Control the weight on the way down',
-      'Press dumbbells together at the top',
-    ],
-    formCues: [
-      'Angle: 30-45 degrees',
-      'Path: Press up and slightly in',
-      'Grip: Neutral or angled',
-      'Range: Full stretch at bottom',
-    ],
-    videoPlaceholder: 'incline-db-press',
-    alternatives: [
-      { id: 'alt1', name: 'Incline Barbell Press', reason: 'Heavier loading' },
-      { id: 'alt2', name: 'Low-to-High Cable Fly', reason: 'Constant tension' },
-      { id: 'alt3', name: 'Landmine Press', reason: 'Shoulder-friendly' },
-    ],
-  },
-  '3': {
-    description: 'Cable flyes isolate the chest muscles through a horizontal adduction movement pattern, providing constant tension throughout the range.',
-    muscleGroups: ['Chest', 'Front Delts'],
-    tips: [
-      'Keep a slight bend in your elbows',
-      'Focus on squeezing your chest at the peak',
-      'Control the negative portion',
-      'Think about hugging a tree',
-    ],
-    formCues: [
-      'Stance: Staggered for stability',
-      'Arms: Slight elbow bend maintained',
-      'Path: Arc motion, not pressing',
-      'Peak: Squeeze chest hard at center',
-    ],
-    videoPlaceholder: 'cable-flyes',
-    alternatives: [
-      { id: 'alt1', name: 'Dumbbell Flyes', reason: 'No cables available' },
-      { id: 'alt2', name: 'Pec Deck Machine', reason: 'Easier to control' },
-      { id: 'alt3', name: 'Resistance Band Flyes', reason: 'Home gym option' },
-    ],
-  },
-};
 
 interface ExerciseDetailSheetProps {
   exercise: ExerciseData | null;
@@ -141,16 +66,64 @@ export function ExerciseDetailSheet({
   deloadMode,
 }: ExerciseDetailSheetProps) {
   const [showSwapOptions, setShowSwapOptions] = useState(false);
+  const [catalogExercise, setCatalogExercise] = useState<CatalogExercise | null>(null);
+  const [alternatives, setAlternatives] = useState<CatalogExercise[]>([]);
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  
+  // Fetch exercise details and alternatives when exercise changes
+  useEffect(() => {
+    if (!exercise || !isOpen) return;
+    
+    let mounted = true;
+    
+    const loadExerciseData = async () => {
+      setIsLoadingDetails(true);
+      try {
+        // Fetch catalog exercise details
+        const catalogData = await dataService.exercise.getExercise(exercise.id);
+        if (mounted && catalogData) {
+          setCatalogExercise(catalogData);
+        }
+        
+        // Fetch alternatives
+        const alts = await dataService.exercise.getAlternatives(exercise.id);
+        if (mounted) {
+          setAlternatives(alts);
+        }
+      } catch (error) {
+        console.error('Failed to load exercise details:', error);
+      } finally {
+        if (mounted) {
+          setIsLoadingDetails(false);
+        }
+      }
+    };
+    
+    loadExerciseData();
+    
+    return () => {
+      mounted = false;
+    };
+  }, [exercise?.id, isOpen]);
+
+  // Reset state when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setShowSwapOptions(false);
+      setCatalogExercise(null);
+      setAlternatives([]);
+    }
+  }, [isOpen]);
   
   if (!exercise) return null;
 
-  const details = exerciseDetails[exercise.id] || {
-    description: 'A strength training exercise targeting multiple muscle groups.',
-    muscleGroups: ['Primary', 'Secondary'],
-    tips: ['Focus on controlled movements', 'Maintain proper form throughout'],
-    formCues: ['Setup properly', 'Breathe consistently'],
-    videoPlaceholder: 'exercise',
-    alternatives: [],
+  // Use catalog data if available, otherwise fallback to defaults
+  const details = {
+    description: catalogExercise?.description || 'A strength training exercise targeting multiple muscle groups.',
+    muscleGroups: catalogExercise?.muscleGroups || ['Primary', 'Secondary'],
+    tips: catalogExercise?.tips || ['Focus on controlled movements', 'Maintain proper form throughout'],
+    formCues: catalogExercise?.formCues || ['Setup properly', 'Breathe consistently'],
+    videoUrl: catalogExercise?.videoUrl,
   };
 
   const formatTime = (seconds: number) => {
@@ -349,23 +322,36 @@ export function ExerciseDetailSheet({
                     <AlertCircle size={16} color="#F59E0B" />
                     <Text className="font-semibold text-sm text-foreground">Alternative Exercises</Text>
                   </View>
-                  <View className="gap-2">
-                    {details.alternatives.map((alt) => (
-                      <Pressable
-                        key={alt.id}
-                        onPress={() => {
-                          onSwapExercise(exercise.id, alt.id, alt.name);
-                          setShowSwapOptions(false);
-                          onClose();
-                        }}
-                        className="p-3 rounded-lg bg-muted/30"
-                        style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
-                      >
-                        <Text className="font-medium text-sm text-foreground">{alt.name}</Text>
-                        <Text className="text-xs text-muted-foreground">{alt.reason}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                  {isLoadingDetails ? (
+                    <View className="py-4 items-center">
+                      <ActivityIndicator size="small" color="#31D5E3" />
+                      <Text className="text-sm text-muted-foreground mt-2">Loading alternatives...</Text>
+                    </View>
+                  ) : alternatives.length > 0 ? (
+                    <View className="gap-2">
+                      {alternatives.map((alt) => (
+                        <Pressable
+                          key={alt.id}
+                          onPress={() => {
+                            onSwapExercise(exercise.id, alt.id, alt.name);
+                            setShowSwapOptions(false);
+                            onClose();
+                          }}
+                          className="p-3 rounded-lg bg-muted/30"
+                          style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                        >
+                          <Text className="font-medium text-sm text-foreground">{alt.name}</Text>
+                          <Text className="text-xs text-muted-foreground">
+                            {alt.muscleGroups.slice(0, 2).join(', ')}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : (
+                    <Text className="text-sm text-muted-foreground text-center py-2">
+                      No alternatives available for this exercise
+                    </Text>
+                  )}
                 </GlassCard>
               )}
             </View>

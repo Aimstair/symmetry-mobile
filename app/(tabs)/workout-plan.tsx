@@ -1,10 +1,12 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import * as React from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { ActiveDayModal } from '@/components/ui/workout/ActiveDayModal';
+import { SwapExerciseModal } from '@/components/ui/workout/SwapExerciseModal';
 import {
   ChevronLeft,
   ChevronRight,
@@ -17,20 +19,23 @@ import {
   ChevronUp,
   Wrench,
   Info,
-  AlertCircle,
+  Plus,
+  Pause,
+  Play,
 } from 'lucide-react-native';
 import { useRouter } from 'expo-router';
 import { cn } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
 import { getExerciseInfo } from '@/hooks/useExercises';
 import {
-  getCurrentWeekCalendar,
   getWeekStart,
   navigateWeek,
   formatMonthYear,
   findTodayIndex,
   mapWorkoutPlanToWeek,
 } from '@/utils/workoutCalendar';
+import { generateSingleDayWorkout } from '@/utils/aiPlanner';
+import type { WorkoutDay } from '@/types';
 
 export default function WorkoutPlanScreen() {
   const router = useRouter();
@@ -38,20 +43,40 @@ export default function WorkoutPlanScreen() {
   // Store selectors
   const workoutPlans = useAppStore((s) => s.workoutPlans);
   const user = useAppStore((s) => s.user);
+  const physiqueScans = useAppStore((s) => s.physiqueScans);
   const isLoading = useAppStore((s) => s.isLoading);
+
+  // Store actions for day toggling
+  const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
+  const syncAddWorkoutDayToCloud = useAppStore((s) => s.syncAddWorkoutDayToCloud);
+  const syncRemoveWorkoutDayFromCloud = useAppStore((s) => s.syncRemoveWorkoutDayFromCloud);
+  const startWorkout = useAppStore((s) => s.startWorkout);
+
+  // Get user's training days (from onboarding)
+  const trainingDays = useMemo(() => {
+    return user?.trainingDays || [];
+  }, [user]);
 
   // Get the active workout plan (first one for now, could add selection logic)
   const activePlan = useMemo(() => {
     return workoutPlans.length > 0 ? workoutPlans[0] : null;
   }, [workoutPlans]);
+  
+  // Get latest physique scan for generating workouts
+  const latestScan = useMemo(() => {
+    if (physiqueScans.length === 0) return null;
+    return physiqueScans.reduce((latest, scan) => 
+      new Date(scan.date) > new Date(latest.date) ? scan : latest
+    );
+  }, [physiqueScans]);
 
   // Week navigation state
   const [currentWeekStart, setCurrentWeekStart] = useState(() => getWeekStart(new Date()));
 
-  // Generate calendar days from the active plan
+  // Generate calendar days from the active plan and training days
   const calendarDays = useMemo(() => {
-    return mapWorkoutPlanToWeek(activePlan, currentWeekStart);
-  }, [activePlan, currentWeekStart]);
+    return mapWorkoutPlanToWeek(activePlan, currentWeekStart, trainingDays);
+  }, [activePlan, currentWeekStart, trainingDays]);
 
   // Find today's index for default selection
   const todayIndex = useMemo(() => {
@@ -63,7 +88,12 @@ export default function WorkoutPlanScreen() {
   const [expandedExercise, setExpandedExercise] = useState<string | null>(null);
   const [swapDialogOpen, setSwapDialogOpen] = useState(false);
   const [exerciseToSwap, setExerciseToSwap] = useState<string | null>(null);
+  const [exerciseToSwapId, setExerciseToSwapId] = useState<string | null>(null);
   const [swappedExercises, setSwappedExercises] = useState<Record<string, string>>({});
+  
+  // Active Day Modal state
+  const [showActiveDayModal, setShowActiveDayModal] = useState(false);
+  const [pendingActiveDayName, setPendingActiveDayName] = useState<string>('');
 
   // Animation refs
   const headerAnim = useRef(new Animated.Value(0)).current;
@@ -104,6 +134,87 @@ export default function WorkoutPlanScreen() {
     setCurrentWeekStart((prev) => navigateWeek(prev, 'next'));
   }, []);
 
+  // Handler: Turn rest day into active day - opens modal
+  const handleMakeActiveDay = useCallback((dayName: string) => {
+    setPendingActiveDayName(dayName);
+    setShowActiveDayModal(true);
+  }, []);
+
+  // Handler: Confirm active day creation from modal
+  const handleConfirmActiveDay = useCallback(async (workoutName: string, muscleGroups: string[]) => {
+    if (!user || !activePlan) return;
+    const dayName = pendingActiveDayName;
+
+    try {
+      // Add this day to user's training days
+      const newTrainingDays = [...trainingDays, dayName];
+      await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
+
+      // Create a new workout day with the selected muscle groups (no exercises yet)
+      const dayIndex = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(dayName);
+      // Get the next order index based on existing workout days
+      const existingDays = activePlan.workoutDays || [];
+      const nextOrderIndex = existingDays.length > 0 
+        ? Math.max(...existingDays.map(d => d.orderIndex)) + 1 
+        : dayIndex;
+      
+      const newWorkoutDay: WorkoutDay = {
+        id: `wd-${Date.now()}`,
+        planId: activePlan.id,
+        name: workoutName,
+        dayName: dayName, // Store which day of the week this workout belongs to
+        orderIndex: nextOrderIndex,
+        muscleGroups: muscleGroups,
+        exercises: [], // Empty - user will add exercises later
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      await syncAddWorkoutDayToCloud(activePlan.id, newWorkoutDay);
+      
+      setShowActiveDayModal(false);
+      setPendingActiveDayName('');
+      Alert.alert('Day Activated', `${dayName} is now an active training day! Add exercises from the workout screen.`);
+    } catch (error) {
+      console.error('Failed to make active day:', error);
+      Alert.alert('Error', 'Failed to activate day. Please try again.');
+    }
+  }, [user, activePlan, trainingDays, pendingActiveDayName, syncUpdateUserToCloud, syncAddWorkoutDayToCloud]);
+
+  // Handler: Turn active day into rest day
+  const handleMakeRestDay = useCallback(async (dayName: string, workoutDayId?: string) => {
+    if (!user || !activePlan) return;
+
+    Alert.alert(
+      'Rest Day',
+      `Make ${dayName} a rest day? The scheduled workout will be removed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Remove this day from user's training days
+              const newTrainingDays = trainingDays.filter((d) => d !== dayName);
+              await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
+
+              // Remove the workout day from the plan
+              if (workoutDayId) {
+                await syncRemoveWorkoutDayFromCloud(activePlan.id, workoutDayId);
+              }
+
+              Alert.alert('Rest Day Set', `${dayName} is now a rest day.`);
+            } catch (error) {
+              console.error('Failed to make rest day:', error);
+              Alert.alert('Error', 'Failed to set rest day. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [user, activePlan, trainingDays, syncUpdateUserToCloud, syncRemoveWorkoutDayFromCloud]);
+
   // Get the selected workout for the day
   const selectedWorkout = calendarDays[selectedDay];
 
@@ -125,6 +236,8 @@ export default function WorkoutPlanScreen() {
         return 'bg-destructive/20 text-destructive border-destructive/30';
       case 'rest':
         return 'bg-muted text-muted-foreground border-border';
+      case 'no-workout':
+        return 'bg-warning/20 text-warning border-warning/30';
       default:
         return 'bg-card text-foreground border-border';
     }
@@ -138,6 +251,8 @@ export default function WorkoutPlanScreen() {
         return <X size={12} color="#EF4444" />;
       case 'today':
         return <Zap size={12} color="#31D5E3" />;
+      case 'no-workout':
+        return <Plus size={12} color="#FBBF24" />;
       default:
         return null;
     }
@@ -149,39 +264,6 @@ export default function WorkoutPlanScreen() {
       <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
         <ActivityIndicator size="large" color="#31D5E3" />
         <Text className="text-muted-foreground mt-4">Loading workout plan...</Text>
-      </SafeAreaView>
-    );
-  }
-
-  // No workout plan state
-  if (!activePlan) {
-    return (
-      <SafeAreaView edges={['top']} className="flex-1 bg-background">
-        <ScrollView className="flex-1">
-          <View className="px-4 py-6">
-            <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
-              <Text className="text-2xl font-bold text-foreground">Workout Plan</Text>
-              <Text className="text-sm text-muted-foreground">{formatMonthYear(currentWeekStart)}</Text>
-            </Animated.View>
-
-            <GlassCard className="items-center py-12">
-              <View className="w-20 h-20 rounded-full bg-muted/50 flex items-center justify-center mb-6">
-                <AlertCircle size={40} color="#71717A" />
-              </View>
-              <Text className="text-xl font-bold text-foreground text-center">No Workout Plan</Text>
-              <Text className="text-muted-foreground mt-2 text-center px-4">
-                You haven't created a workout plan yet. Complete onboarding to get a personalized plan.
-              </Text>
-              <Button
-                className="mt-6 bg-primary"
-                onPress={() => router.push('/onboarding')}
-              >
-                <Zap size={16} color="#FFFFFF" />
-                <Text className="text-primary-foreground font-semibold ml-2">Create Plan</Text>
-              </Button>
-            </GlassCard>
-          </View>
-        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -246,14 +328,53 @@ export default function WorkoutPlanScreen() {
           {/* Selected Workout Details */}
           <Animated.View style={createAnimStyle(contentAnim)}>
             {selectedWorkout.isRestDay ? (
+              // REST DAY - User didn't select this day for training
               <GlassCard className="items-center py-8">
                 <View className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
                   <Calendar size={32} color="#71717A" />
                 </View>
                 <Text className="text-xl font-bold text-foreground">Rest Day</Text>
                 <Text className="text-muted-foreground mt-2 text-center">Recovery is part of the process. Rest up!</Text>
+                
+                {/* Turn into Active Day button */}
+                <Button 
+                  variant="outline" 
+                  className="mt-6"
+                  onPress={() => handleMakeActiveDay(selectedWorkout.day)}
+                  disabled={isLoading}
+                >
+                  <Play size={16} color="#31D5E3" />
+                  <Text className="text-foreground font-semibold ml-2">Turn into Active Day</Text>
+                </Button>
+              </GlassCard>
+            ) : selectedWorkout.isTrainingDay && !selectedWorkout.workoutDay ? (
+              // TRAINING DAY BUT NO WORKOUT PLANNED
+              <GlassCard className="items-center py-8">
+                <View className="w-16 h-16 rounded-full bg-warning/20 flex items-center justify-center mb-4">
+                  <Plus size={32} color="#FBBF24" />
+                </View>
+                <Text className="text-xl font-bold text-foreground">No Workout Planned</Text>
+                <Text className="text-muted-foreground mt-2 text-center px-4">
+                  This is a training day but no workout routine is scheduled.
+                </Text>
+                <Button 
+                  className="mt-6 bg-primary" 
+                  onPress={() => {
+                    router.push({
+                      pathname: '/workout-builder',
+                      params: {
+                        date: selectedWorkout.fullDate.toISOString(),
+                        dayName: selectedWorkout.day,
+                      },
+                    });
+                  }}
+                >
+                  <Plus size={16} color="#FFFFFF" />
+                  <Text className="text-primary-foreground font-semibold ml-2">Add Workout Routine</Text>
+                </Button>
               </GlassCard>
             ) : (
+              // TRAINING DAY WITH WORKOUT
               <>
                 <GlassCard
                   variant="glow"
@@ -290,10 +411,30 @@ export default function WorkoutPlanScreen() {
                   </View>
 
                   {selectedWorkout.status === 'today' && (
-                    <Button className="w-full mt-4 bg-primary" onPress={() => router.push('/active-workout')}>
-                      <Zap size={16} color="#FFFFFF" />
-                      <Text className="text-primary-foreground font-semibold ml-2">Start Workout</Text>
-                    </Button>
+                    <View className="gap-3 mt-4">
+                      <Button 
+                        className="w-full bg-primary" 
+                        onPress={() => {
+                          // Set active workout state before navigating
+                          if (selectedWorkout.workoutDay?.id) {
+                            startWorkout(selectedWorkout.workoutDay.id);
+                          }
+                          router.push('/active-workout');
+                        }}
+                      >
+                        <Zap size={16} color="#FFFFFF" />
+                        <Text className="text-primary-foreground font-semibold ml-2">Start Workout</Text>
+                      </Button>
+                      <Button 
+                        variant="outline" 
+                        className="w-full" 
+                        onPress={() => handleMakeRestDay(selectedWorkout.day, selectedWorkout.workoutDay?.id)}
+                        disabled={isLoading}
+                      >
+                        <Pause size={16} color="#71717A" />
+                        <Text className="text-muted-foreground font-semibold ml-2">Rest Today</Text>
+                      </Button>
+                    </View>
                   )}
 
                   {selectedWorkout.status === 'completed' && (
@@ -304,7 +445,7 @@ export default function WorkoutPlanScreen() {
                           <Text className="text-xs text-muted-foreground">Duration</Text>
                         </View>
                         <View className="items-center flex-1">
-                          <Text className="text-lg font-bold text-foreground">{dayExercises.reduce((sum, e) => sum + e.sets, 0)}</Text>
+                          <Text className="text-lg font-bold text-foreground">{dayExercises.reduce((sum, e) => sum + e.targetSets, 0)}</Text>
                           <Text className="text-xs text-muted-foreground">Sets</Text>
                         </View>
                         <View className="items-center flex-1">
@@ -320,8 +461,9 @@ export default function WorkoutPlanScreen() {
                 <Text className="text-sm font-semibold text-muted-foreground mb-3 uppercase tracking-wide">Exercises</Text>
                 <View className="gap-2">
                   {dayExercises.map((exercise, i) => {
-                    const displayName = swappedExercises[exercise.name] || exercise.name;
-                    const info = getExerciseInfo(exercise.name);
+                    const exerciseName = exercise.exercise?.name || exercise.exerciseId;
+                    const displayName = swappedExercises[exerciseName] || exerciseName;
+                    const info = getExerciseInfo(exerciseName);
                     const isExpanded = expandedExercise === exercise.id;
 
                     return (
@@ -334,14 +476,15 @@ export default function WorkoutPlanScreen() {
                             <View className="flex-1">
                               <Text className="font-medium text-sm text-foreground">{displayName}</Text>
                               <Text className="text-xs text-muted-foreground">
-                                {exercise.sets} sets • {exercise.reps} reps
+                                {exercise.targetSets} sets • {exercise.targetReps} reps
                               </Text>
                             </View>
 
                             {selectedWorkout.status !== 'completed' && (
                               <Pressable
                                 onPress={() => {
-                                  setExerciseToSwap(exercise.name);
+                                  setExerciseToSwap(exerciseName);
+                                  setExerciseToSwapId(exercise.exerciseId);
                                   setSwapDialogOpen(true);
                                 }}
                                 className="h-8 w-8 items-center justify-center"
@@ -366,7 +509,7 @@ export default function WorkoutPlanScreen() {
                               <View>
                                 <Text className="text-xs font-semibold text-muted-foreground mb-1">MUSCLES TARGETED</Text>
                                 <View className="flex-row flex-wrap gap-2">
-                                  {info.muscles.map((muscle) => (
+                                  {info.muscleGroups.map((muscle) => (
                                     <View key={muscle} className="px-2 py-1 bg-primary/10 rounded-full">
                                       <Text className="text-xs text-primary">{muscle}</Text>
                                     </View>
@@ -374,10 +517,10 @@ export default function WorkoutPlanScreen() {
                                 </View>
                               </View>
 
-                              {/* Reason */}
+                              {/* Description */}
                               <View className="flex-row gap-2">
                                 <Info size={14} color="#71717A" style={{ marginTop: 2 }} />
-                                <Text className="text-xs text-muted-foreground flex-1">{info.reason}</Text>
+                                <Text className="text-xs text-muted-foreground flex-1">{info.description}</Text>
                               </View>
 
                               {/* Notes if present */}
@@ -399,45 +542,31 @@ export default function WorkoutPlanScreen() {
         </View>
       </ScrollView>
 
-      {/* Swap Exercise Dialog */}
-      {swapDialogOpen && exerciseToSwap && (
-        <View className="absolute inset-0 bg-black/50 items-center justify-center">
-          <Pressable className="absolute inset-0" onPress={() => setSwapDialogOpen(false)} />
-          <View className="bg-card rounded-2xl p-6 mx-4 max-w-sm w-full">
-            <Text className="text-lg font-bold text-foreground mb-2">Swap Exercise</Text>
-            <Text className="text-sm text-muted-foreground mb-4">
-              Choose an alternative for <Text className="font-medium text-foreground">{exerciseToSwap}</Text>
-            </Text>
-            <View className="gap-2">
-              {getExerciseInfo(exerciseToSwap).alternatives.map((alt) => (
-                <Pressable
-                  key={alt.name}
-                  onPress={() => {
-                    setSwappedExercises((prev) => ({
-                      ...prev,
-                      [exerciseToSwap]: alt.name,
-                    }));
-                    setSwapDialogOpen(false);
-                  }}
-                  className="border border-border rounded-lg p-3 flex-row items-center justify-between"
-                  style={({ pressed }) => ({
-                    opacity: pressed ? 0.7 : 1,
-                  })}
-                >
-                  <Text className="font-medium text-foreground">{alt.name}</Text>
-                  <Text className="text-xs text-muted-foreground">{alt.equipment}</Text>
-                </Pressable>
-              ))}
-              {getExerciseInfo(exerciseToSwap).alternatives.length === 0 && (
-                <Text className="text-muted-foreground text-center py-4">No alternatives available</Text>
-              )}
-            </View>
-            <Button variant="ghost" className="mt-4" onPress={() => setSwapDialogOpen(false)}>
-              <Text className="text-muted-foreground">Cancel</Text>
-            </Button>
-          </View>
-        </View>
-      )}
+      {/* Swap Exercise Modal */}
+      <SwapExerciseModal
+        open={swapDialogOpen}
+        onOpenChange={setSwapDialogOpen}
+        exerciseId={exerciseToSwapId}
+        exerciseName={exerciseToSwap || ''}
+        onSwap={(newId, newName) => {
+          if (exerciseToSwap) {
+            setSwappedExercises((prev) => ({
+              ...prev,
+              [exerciseToSwap]: newName,
+            }));
+          }
+          setExerciseToSwap(null);
+          setExerciseToSwapId(null);
+        }}
+      />
+
+      {/* Active Day Modal */}
+      <ActiveDayModal
+        open={showActiveDayModal}
+        onOpenChange={setShowActiveDayModal}
+        dayName={pendingActiveDayName}
+        onConfirm={handleConfirmActiveDay}
+      />
     </SafeAreaView>
   );
 }

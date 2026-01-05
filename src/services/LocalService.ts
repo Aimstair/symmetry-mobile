@@ -13,7 +13,9 @@
 import { getStorageItem, setStorageItem } from '@/lib/storage';
 import type {
   IDataService,
+  IExerciseService,
   IWorkoutService,
+  IHistoryService,
   IProgressService,
   IUserService,
 } from './interfaces';
@@ -25,6 +27,8 @@ import type {
   CardioLog,
   NutritionTargets,
   EquipmentProfile,
+  CatalogExercise,
+  ExerciseCacheMetadata,
 } from '@/types';
 
 /**
@@ -83,6 +87,36 @@ class LocalWorkoutService implements IWorkoutService {
     const filtered = plans.filter((p) => p.id !== id);
     setStorageDataArray(this.STORAGE_KEY, filtered);
   }
+  
+  // Day-level operations (stubs for local)
+  async addWorkoutDay(planId: string, day: any): Promise<any> {
+    throw new Error('addWorkoutDay not implemented in LocalService');
+  }
+  
+  async updateWorkoutDay(dayId: string, updates: any): Promise<any> {
+    throw new Error('updateWorkoutDay not implemented in LocalService');
+  }
+  
+  async deleteWorkoutDay(dayId: string): Promise<void> {
+    throw new Error('deleteWorkoutDay not implemented in LocalService');
+  }
+  
+  // Exercise-level operations (stubs)
+  async addPlanExercise(dayId: string, exercise: any): Promise<any> {
+    throw new Error('addPlanExercise not implemented in LocalService');
+  }
+  
+  async updatePlanExercise(exerciseId: string, updates: any): Promise<any> {
+    throw new Error('updatePlanExercise not implemented in LocalService');
+  }
+  
+  async deletePlanExercise(exerciseId: string): Promise<void> {
+    throw new Error('deletePlanExercise not implemented in LocalService');
+  }
+  
+  async reorderPlanExercises(dayId: string, exerciseIds: string[]): Promise<void> {
+    throw new Error('reorderPlanExercises not implemented in LocalService');
+  }
 }
 
 /**
@@ -92,6 +126,36 @@ class LocalProgressService implements IProgressService {
   private readonly BODY_KEY = 'body_measurements';
   private readonly SCAN_KEY = 'physique_scans';
   private readonly CARDIO_KEY = 'cardio_logs';
+  private readonly MEASUREMENT_LOGS_KEY = 'measurement_logs';
+
+  // New normalized measurement logs
+  async getMeasurementLogs(userId: string): Promise<any[]> {
+    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    return data.filter((m: any) => m.userId === userId);
+  }
+  
+  async addMeasurementLog(log: any): Promise<any> {
+    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const newLog = { ...log, id: `ml_${Date.now()}`, createdAt: new Date() };
+    data.push(newLog);
+    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
+    return newLog;
+  }
+  
+  async updateMeasurementLog(id: string, updates: any): Promise<any> {
+    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const index = data.findIndex((m: any) => m.id === id);
+    if (index === -1) throw new Error(`MeasurementLog ${id} not found`);
+    data[index] = { ...data[index], ...updates };
+    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
+    return data[index];
+  }
+  
+  async deleteMeasurementLog(id: string): Promise<void> {
+    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const filtered = data.filter((m: any) => m.id !== id);
+    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, filtered);
+  }
 
   async getBodyMeasurements(userId: string): Promise<BodyMeasurement[]> {
     const data = getStorageData<BodyMeasurement>(this.BODY_KEY);
@@ -181,16 +245,89 @@ class LocalUserService implements IUserService {
 }
 
 /**
+ * Exercise Service - Local Stub Implementation
+ * Returns empty/null for local development
+ * Real data comes from CloudService when enabled
+ */
+class LocalExerciseService implements IExerciseService {
+  async getExercises(): Promise<CatalogExercise[]> {
+    return [];
+  }
+  
+  async getExercise(id: string): Promise<CatalogExercise | null> {
+    return null;
+  }
+  
+  async searchExercises(query: string): Promise<CatalogExercise[]> {
+    return [];
+  }
+  
+  async filterExercises(filters: {
+    muscleGroups?: string[];
+    equipment?: string[];
+    environment?: 'gym' | 'home' | 'any';
+  }): Promise<CatalogExercise[]> {
+    return [];
+  }
+  
+  async getAlternatives(exerciseId: string): Promise<CatalogExercise[]> {
+    return [];
+  }
+  
+  async forceSync(): Promise<void> {
+    // No-op for local
+  }
+  
+  getCacheMetadata(): ExerciseCacheMetadata | null {
+    return null;
+  }
+}
+
+/**
+ * History Service - Local Stub Implementation  
+ * Returns empty data for local development
+ */
+class LocalHistoryService implements IHistoryService {
+  async saveWorkoutSession(input: any): Promise<any> {
+    return { ...input, id: `session_${Date.now()}` };
+  }
+  
+  async getWorkoutHistory(userId: string, options?: any): Promise<any[]> {
+    return [];
+  }
+  
+  async getWorkoutSession(sessionId: string): Promise<any | null> {
+    return null;
+  }
+  
+  async getExerciseHistory(userId: string, exerciseId: string, limit?: number): Promise<any[]> {
+    return [];
+  }
+  
+  async getExercisePRs(userId: string, exerciseId: string): Promise<any | null> {
+    return null;
+  }
+  
+  async deleteWorkoutSession(sessionId: string): Promise<void> {
+    // No-op for local
+  }
+}
+
+/**
  * Main Local Service
  * Export singleton instance
  */
 export class LocalDataService implements IDataService {
+  exercise: IExerciseService;
   workout: IWorkoutService;
+  history: IHistoryService;
   progress: IProgressService;
   user: IUserService;
 
   constructor() {
+    this.exercise = new LocalExerciseService();
     this.workout = new LocalWorkoutService();
+    this.history = new LocalHistoryService();
     this.progress = new LocalProgressService();
     this.user = new LocalUserService();
   }

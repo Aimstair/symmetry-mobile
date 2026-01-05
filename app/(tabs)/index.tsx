@@ -91,9 +91,12 @@ export default function Dashboard() {
   // Get active workout plan (first active one or first plan)
   const activePlan = workoutPlans.find(p => p.name) || workoutPlans[0] || null;
   
+  // Get user's training days
+  const trainingDays = user?.trainingDays || [];
+  
   // Get today's workout from the plan using calendar mapping
   const weekStart = getWeekStart(new Date());
-  const weekCalendar = mapWorkoutPlanToWeek(activePlan, weekStart);
+  const weekCalendar = mapWorkoutPlanToWeek(activePlan, weekStart, trainingDays);
   const today = new Date();
   const todayCalendar = weekCalendar.find(
     day => day.fullDate.getDate() === today.getDate() &&
@@ -102,6 +105,7 @@ export default function Dashboard() {
 
   // Check if today is a rest day or has a workout
   const isRestDay = todayCalendar?.isRestDay ?? true;
+  const isTrainingDay = todayCalendar?.isTrainingDay ?? false;
   const todayWorkout = todayCalendar?.workoutDay;
 
   // Get latest physique data
