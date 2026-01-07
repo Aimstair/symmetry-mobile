@@ -43,6 +43,7 @@ export default function Dashboard() {
     physiqueScans,
     bodyMeasurements,
     cardioLogs,
+    workoutHistory,
   } = useAppStore();
   const headerAnim = React.useRef(new Animated.Value(0)).current;
   const card1Anim = React.useRef(new Animated.Value(0)).current;
@@ -82,11 +83,20 @@ export default function Dashboard() {
     return 'Good Evening';
   };
 
-  const todayMacros = {
-    protein: { current: nutritionTargets?.protein, target: nutritionTargets?.protein || 180 },
-    carbs: { current: nutritionTargets?.carbs, target: nutritionTargets?.carbs || 300 },
-    fats: { current: nutritionTargets?.fats, target: nutritionTargets?.fats || 70 },
-  };
+  const todayMacros = React.useMemo(() => ({
+    protein: { 
+      current: nutritionTargets?.protein ?? 0, 
+      target: nutritionTargets?.protein ?? 180 
+    },
+    carbs: { 
+      current: nutritionTargets?.carbs ?? 0, 
+      target: nutritionTargets?.carbs ?? 300 
+    },
+    fats: { 
+      current: nutritionTargets?.fats ?? 0, 
+      target: nutritionTargets?.fats ?? 70 
+    },
+  }), [nutritionTargets]);
 
   // Get active workout plan (first active one or first plan)
   const activePlan = workoutPlans.find(p => p.name) || workoutPlans[0] || null;
@@ -107,6 +117,23 @@ export default function Dashboard() {
   const isRestDay = todayCalendar?.isRestDay ?? true;
   const isTrainingDay = todayCalendar?.isTrainingDay ?? false;
   const todayWorkout = todayCalendar?.workoutDay;
+
+  // Check if today's workout is already completed
+  const isTodayCompleted = React.useMemo(() => {
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    return workoutHistory.some((session: any) => {
+      if (session.startedAt) {
+        const date = new Date(session.startedAt);
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const sessionDateStr = `${year}-${month}-${day}`;
+        return sessionDateStr === todayStr;
+      }
+      return false;
+    });
+  }, [workoutHistory]);
 
   // Get latest physique data
   const latestPhysiqueScan = physiqueScans.length > 0 ? physiqueScans[0] : null;
@@ -129,37 +156,52 @@ export default function Dashboard() {
       date: Date;
     }> = [];
 
-    // Add recent physique scans
+    // Add recent physique scans (with date validation)
     physiqueScans.slice(0, 2).forEach(scan => {
-      activities.push({
-        id: `scan-${scan.id}`,
-        type: 'scan',
-        title: 'Physique Scan',
-        subtitle: `Score: ${scan.symmetryScore}%`,
-        date: new Date(scan.date),
-      });
+      if (scan.date) {
+        const scanDate = new Date(scan.date);
+        if (!isNaN(scanDate.getTime())) {
+          activities.push({
+            id: `scan-${scan.id}`,
+            type: 'scan',
+            title: 'Physique Scan',
+            subtitle: `Score: ${scan.symmetryScore}%`,
+            date: scanDate,
+          });
+        }
+      }
     });
 
-    // Add recent body measurements
+    // Add recent body measurements (with date validation)
     bodyMeasurements.slice(0, 2).forEach(m => {
-      activities.push({
-        id: `measurement-${m.id}`,
-        type: 'measurement',
-        title: 'Weight Update',
-        subtitle: `${m.weight} lbs`,
-        date: new Date(m.date),
-      });
+      if (m.date) {
+        const measurementDate = new Date(m.date);
+        if (!isNaN(measurementDate.getTime())) {
+          activities.push({
+            id: `measurement-${m.id}`,
+            type: 'measurement',
+            title: 'Weight Update',
+            subtitle: `${m.weight} lbs`,
+            date: measurementDate,
+          });
+        }
+      }
     });
 
-    // Add recent cardio logs
+    // Add recent cardio logs (with date validation)
     cardioLogs.slice(0, 2).forEach(log => {
-      activities.push({
-        id: `cardio-${log.id}`,
-        type: 'cardio',
-        title: log.type.charAt(0).toUpperCase() + log.type.slice(1),
-        subtitle: `${log.duration} min${log.calories ? ` • ${log.calories} cal` : ''}`,
-        date: new Date(log.date),
-      });
+      if (log.date) {
+        const cardioDate = new Date(log.date);
+        if (!isNaN(cardioDate.getTime())) {
+          activities.push({
+            id: `cardio-${log.id}`,
+            type: 'cardio',
+            title: log.type.charAt(0).toUpperCase() + log.type.slice(1),
+            subtitle: `${log.duration} min${log.calories ? ` • ${log.calories} cal` : ''}`,
+            date: cardioDate,
+          });
+        }
+      }
     });
 
     // Sort by date descending and take top 3
@@ -288,41 +330,73 @@ export default function Dashboard() {
                 </View>
               </View>
             </GlassCard>
-          ) : todayWorkout ? (
-            // Workout Day Card
-            <GlassCard variant="glow" glowColor="primary" className="overflow-hidden">
-              <View className="flex-row items-center gap-4">
-                <View className="w-14 h-14 rounded-xl bg-primary flex items-center justify-center">
-                  <Dumbbell size={28} color="#0A0A0F" />
-                </View>
-                <View className="flex-1">
-                  <Text className="font-bold text-lg text-foreground">
-                    {todayWorkout.name}
-                  </Text>
-                  <Text className="text-sm text-muted-foreground capitalize">
-                    {todayWorkout.muscleGroups.join(' • ')}
-                  </Text>
-                  <View className="flex-row items-center gap-2 mt-1">
-                    <Text className="text-xs text-primary font-medium">
-                      {todayWorkout.exercises?.length || 0} exercises
+          ) : isTrainingDay ? (
+            // Workout Day Card (show completion status if already done)
+            isTodayCompleted ? (
+              // Completed Workout Card
+              <GlassCard variant="glow" glowColor="success" className="overflow-hidden">
+                <View className="flex-row items-center gap-4">
+                  <View className="w-14 h-14 rounded-xl bg-green-500 flex items-center justify-center">
+                    <Sparkles size={28} color="#0A0A0F" />
+                  </View>
+                  <View className="flex-1">
+                    <Text className="font-bold text-lg text-foreground">
+                      Workout Complete!
                     </Text>
-                    <Text className="text-xs text-muted-foreground">•</Text>
-                    <Text className="text-xs text-muted-foreground">~60 min</Text>
+                    <Text className="text-sm text-muted-foreground">
+                      {todayWorkout?.name || 'Great job today'}
+                    </Text>
+                    <Text className="text-xs text-green-500 font-medium mt-1">
+                      ✓ Mission accomplished
+                    </Text>
                   </View>
                 </View>
-              </View>
-              <Button
-                onPress={() => router.push('/active-workout')}
-                className="w-full mt-4 bg-primary h-11"
-              >
-                <View className="flex-row items-center gap-2">
-                  <Zap size={16} color="#0A0A0F" />
-                  <Text className="text-primary-foreground font-semibold">
-                    Start Workout
+                <Button
+                  onPress={() => router.push('/(tabs)/workout-plan')}
+                  variant="outline"
+                  className="w-full mt-4"
+                >
+                  <Text className="text-foreground font-medium">
+                    View Progress
                   </Text>
+                </Button>
+              </GlassCard>
+            ) : (
+              // Start Workout Card
+              <GlassCard variant="glow" glowColor="primary" className="overflow-hidden">
+                <View className="flex-row items-center gap-4">
+                  <View className="w-14 h-14 rounded-xl bg-primary flex items-center justify-center">
+                    <Dumbbell size={28} color="#0A0A0F" />
+                  </View>
+                  <View className="flex-1">
+                    <Text className="font-bold text-lg text-foreground">
+                      {todayWorkout?.name || 'Workout Day'}
+                    </Text>
+                    <Text className="text-sm text-muted-foreground capitalize">
+                      {todayWorkout?.muscleGroups.join(' • ') || 'Ready to train'}
+                    </Text>
+                    <View className="flex-row items-center gap-2 mt-1">
+                      <Text className="text-xs text-primary font-medium">
+                        {todayWorkout?.exercises?.length || 0} exercises
+                      </Text>
+                      <Text className="text-xs text-muted-foreground">•</Text>
+                      <Text className="text-xs text-muted-foreground">~60 min</Text>
+                    </View>
+                  </View>
                 </View>
-              </Button>
-            </GlassCard>
+                <Button
+                  onPress={() => router.push('/active-workout')}
+                  className="w-full mt-4 bg-primary h-11"
+                >
+                  <View className="flex-row items-center gap-2">
+                    <Zap size={16} color="#0A0A0F" />
+                    <Text className="text-primary-foreground font-semibold">
+                      Start Workout
+                    </Text>
+                  </View>
+                </Button>
+              </GlassCard>
+            )
           ) : (
             // No Plan Card
             <GlassCard className="overflow-hidden">

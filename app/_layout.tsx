@@ -198,31 +198,17 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         setProfileChecked(false);
         
         // Add timeout to prevent infinite loading
-        const timeoutId = setTimeout(async () => {
+        const timeoutId = setTimeout(() => {
           if (isFetchingProfile.current) {
-            console.error('⚠️ Profile fetch timeout - forcing completion');
-            
-            // Verify session still exists before proceeding
-            const { data: { session: currentSession } } = await supabase.auth.getSession();
-            if (!currentSession) {
-              console.error('❌ Session lost during timeout - cannot proceed');
-              isFetchingProfile.current = false;
-              setIsProfileLoading(false);
-              setProfileChecked(true);
-              setSession(null);
-              return;
-            }
-            
             if (__DEV__) {
-              console.log('✅ Session still valid after timeout, proceeding to onboarding');
+              console.log('⚠️ Profile fetch timeout - proceeding without profile');
             }
-            
             isFetchingProfile.current = false;
             setIsProfileLoading(false);
             setProfileChecked(true);
-            // Keep session intact - let it proceed to onboarding
+            // Session is preserved - user will go to onboarding
           }
-        }, 5000); // Increased to 5 second timeout to allow more time for DB query
+        }, 4000); // 4 second timeout
         
         try {
           if (!isUsingCloudService()) {
@@ -337,54 +323,33 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Navigation Guard Component
+ * Navigation Guard Component (Guest-First Architecture)
  * 
  * Handles navigation after the Stack is mounted.
- * This component is rendered INSIDE the Stack, ensuring navigation is safe.
+ * No login required - new users go straight to onboarding.
+ * Login is optional via Settings screen.
  */
 function NavigationGuard() {
   const router = useRouter();
   const segments = useSegments();
   const rootNavigationState = useRootNavigationState();
   
-  // Get user and onboarding state from store
-  const user = useAppStore((s) => s.user);
+  // Get onboarding state from store (no session check needed for navigation)
   const onboarding = useAppStore((s) => s.onboarding);
   
-  // Track session state for navigation decisions
-  const [hasSession, setHasSession] = useState(false);
-  
-  // Check for active Supabase session
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setHasSession(!!session);
-    });
-    
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setHasSession(!!session);
-    });
-    
-    return () => subscription.unsubscribe();
-  }, []);
-
   // Check if navigation is ready
   const navigationReady = rootNavigationState?.key != null;
 
   useEffect(() => {
+    // Wait for navigation to be ready
     if (!navigationReady) {
-      if (__DEV__) {
-        console.log('🧭 Waiting for navigation to be ready...');
-      }
       return;
     }
 
     if (__DEV__) {
-      console.log('🧭 Navigation check:', {
-        hasSession,
-        hasUser: !!user,
+      console.log('🧭 Navigation check (Guest-First):', {
         onboardingCompleted: onboarding.completed,
         currentSegment: segments[0],
-        segmentsLength: segments.length,
       });
     }
 
@@ -396,48 +361,26 @@ function NavigationGuard() {
     const inTabs = currentSegment === '(tabs)';
     const onIndex = currentSegment === 'index' || currentSegment === undefined;
 
-    // Don't redirect if we're in the auth callback
-    if (inAuthCallback) {
+    // Don't redirect if we're in the auth callback or login (user explicitly navigated there)
+    if (inAuthCallback || inAuthGroup) {
       return;
     }
 
-    // Navigation logic based on session and user profile
-    if (hasSession) {
-      // User is authenticated with Supabase
-      if (user) {
-        // Has profile - go to tabs (or onboarding if not completed)
-        if (inAuthGroup || onIndex) {
-          if (!onboarding.completed) {
-            if (__DEV__) {
-              console.log('🧭 Redirecting to onboarding (has user, not completed)');
-            }
-            router.replace('/onboarding');
-          } else {
-            if (__DEV__) {
-              console.log('🧭 Redirecting to tabs (has user, completed)');
-            }
-            router.replace('/(tabs)');
-          }
-        }
-      } else {
-        // Has session but no profile - needs onboarding (first-time user)
-        if (!inOnboarding) {
-          if (__DEV__) {
-            console.log('🧭 Redirecting to onboarding (has session, no profile)');
-          }
-          router.replace('/onboarding');
-        }
+    // Guest-First Navigation Logic:
+    // 1. Not onboarded? → Go to onboarding
+    // 2. Onboarded? → Go to tabs
+    if (!onboarding.completed) {
+      // User hasn't completed onboarding
+      if (!inOnboarding) {
+        router.replace('/onboarding');
       }
     } else {
-      // No session - needs login
-      if (!inAuthGroup && (onIndex || inOnboarding)) {
-        if (__DEV__) {
-          console.log('🧭 Redirecting to login (no session)');
-        }
-        router.replace('/login');
+      // User has completed onboarding - go to main app
+      if (onIndex || inOnboarding) {
+        router.replace('/(tabs)');
       }
     }
-  }, [navigationReady, segments, user, onboarding.completed, router, hasSession]);
+  }, [navigationReady, segments, onboarding.completed, router]);
 
   return null; // This component just handles navigation, doesn't render anything
 }

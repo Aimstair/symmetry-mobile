@@ -43,7 +43,8 @@ import {
   Sparkles,
   LogOut,
   Edit3,
-  Save
+  Save,
+  Cloud
 } from 'lucide-react-native';
 import { cn, convert } from '@/lib/utils';
 import type { User as UserType } from '@/types';
@@ -61,6 +62,7 @@ export default function Settings() {
 
   // Get store data and actions
   const user = useAppStore((s) => s.user);
+  const isGuest = useAppStore((s) => s.isGuest);
   const settings = useAppStore((s) => s.settings);
   const equipment = useAppStore((s) => s.equipment);
   const nutritionTargets = useAppStore((s) => s.nutritionTargets);
@@ -138,6 +140,18 @@ export default function Settings() {
     transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [30, 0] }) }],
   });
 
+  // Get display name for fitness goal
+  const getGoalDisplayName = (goal: string | undefined) => {
+    if (!goal) return '';
+    const goalMap: Record<string, string> = {
+      'bulk': 'Build Muscle',
+      'cut': 'Lose Fat',
+      'maintenance': 'Maintain',
+      'recomp': 'Recomposition',
+    };
+    return goalMap[goal] || goal;
+  };
+
   // Handle profile save
   const handleSaveProfile = async () => {
     if (!user) return;
@@ -162,6 +176,7 @@ export default function Settings() {
         height: heightInCm,
         weight: weightInKg,
         goal: profileForm.goal as UserType['goal'],
+        trainingDays: user.trainingDays, // Preserve existing training days
       });
 
       // B. Recalculate Nutrition Targets using metric values
@@ -337,6 +352,32 @@ export default function Settings() {
             </Text>
           </Animated.View>
 
+          {/* Cloud Sync Section - Show for guests */}
+          {isGuest && (
+            <Animated.View style={createAnimStyle(section1Anim)} className="mb-6">
+              <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+                Cloud Sync
+              </Text>
+              <Pressable
+                onPress={() => router.push('/login')}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center gap-4">
+                  <View className="w-14 h-14 rounded-full bg-primary flex items-center justify-center">
+                    <Cloud size={28} color="#0A0A0F" />
+                  </View>
+                  <View className="flex-1">
+                    <Text className="font-bold text-foreground">Sign In to Sync</Text>
+                    <Text className="text-sm text-muted-foreground">
+                      Backup your data and sync across devices
+                    </Text>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
+                </GlassCard>
+              </Pressable>
+            </Animated.View>
+          )}
+
           {/* Profile Section */}
           <Animated.View style={createAnimStyle(section1Anim)} className="mb-6">
             <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
@@ -352,10 +393,12 @@ export default function Settings() {
                 </View>
                 <View className="flex-1">
                   <Text className="font-bold text-foreground">{user?.name || 'Athlete'}</Text>
-                  <Text className="text-sm text-muted-foreground">{user?.email || 'No email set'}</Text>
+                  <Text className="text-sm text-muted-foreground">
+                    {isGuest ? 'Guest Account' : (user?.email || 'No email set')}
+                  </Text>
                   {user?.goal && (
-                    <Text className="text-xs text-primary capitalize mt-0.5">
-                      Goal: {user.goal.replace('-', ' ')}
+                    <Text className="text-xs text-primary mt-0.5">
+                      Goal: {getGoalDisplayName(user.goal)}
                     </Text>
                   )}
                 </View>
@@ -605,18 +648,21 @@ export default function Settings() {
                 </Button>
               </GlassCard>
 
-              <Pressable
-                onPress={handleSignOut}
-                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
-              >
-                <GlassCard className="flex-row items-center justify-between">
-                  <View className="flex-row items-center gap-3">
-                    <LogOut size={20} color="#F59E0B" />
-                    <Text className="text-foreground">Sign Out</Text>
-                  </View>
-                  <ChevronRight size={20} color="#71717A" />
-                </GlassCard>
-              </Pressable>
+              {/* Sign Out - only show for authenticated users */}
+              {!isGuest && (
+                <Pressable
+                  onPress={handleSignOut}
+                  style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                >
+                  <GlassCard className="flex-row items-center justify-between">
+                    <View className="flex-row items-center gap-3">
+                      <LogOut size={20} color="#F59E0B" />
+                      <Text className="text-foreground">Sign Out</Text>
+                    </View>
+                    <ChevronRight size={20} color="#71717A" />
+                  </GlassCard>
+                </Pressable>
+              )}
 
               <Pressable
                 onPress={() => setShowDeleteConfirm(true)}
@@ -625,7 +671,7 @@ export default function Settings() {
                 <GlassCard className="flex-row items-center justify-between border-destructive/30">
                   <View className="flex-row items-center gap-3">
                     <Trash2 size={20} color="#EF4444" />
-                    <Text className="text-destructive">Delete Account</Text>
+                    <Text className="text-destructive">{isGuest ? 'Reset App Data' : 'Delete Account'}</Text>
                   </View>
                   <ChevronRight size={20} color="#EF4444" />
                 </GlassCard>
@@ -718,7 +764,7 @@ export default function Settings() {
                 onValueChange={(v) => setProfileForm({ ...profileForm, goal: v as 'bulk' | 'cut' | 'recomp' | 'maintenance' })}
               >
                 <SelectTrigger className="mt-1">
-                  <SelectValue />
+                  <Text className="text-foreground">{getGoalDisplayName(profileForm.goal)}</Text>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="bulk">Build Muscle</SelectItem>

@@ -71,6 +71,7 @@ export default function PhysiqueScan() {
   const user = useAppStore((s) => s.user);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const workoutPlans = useAppStore((s) => s.workoutPlans);
+  const workoutHistory = useAppStore((s) => s.workoutHistory);
   const syncAddPhysiqueScan = useAppStore((s) => s.syncAddPhysiqueScan);
   const syncWorkoutPlanToCloud = useAppStore((s) => s.syncWorkoutPlanToCloud);
   const syncUpdateWorkoutPlanToCloud = useAppStore((s) => s.syncUpdateWorkoutPlanToCloud);
@@ -184,7 +185,6 @@ export default function PhysiqueScan() {
               try {
                 const aiPlan = generatePlanFromScan(savedScan, new Date(), {
                   user,
-                  lackingThreshold: 70,
                 });
 
                 // Check if a workout plan already exists
@@ -192,12 +192,61 @@ export default function PhysiqueScan() {
                 
                 if (existingPlan) {
                   // Update the existing plan with new workout days from the AI-generated plan
-                  // Keep the existing plan's ID and metadata, but replace the workout days
+                  // Keep the existing plan's ID and metadata, but preserve completed days
+                  
+                  let mergedWorkoutDays = aiPlan.workoutDays;
+                  
+                  // Try to preserve completed workouts if workoutHistory is available
+                  try {
+                    if (workoutHistory && Array.isArray(workoutHistory) && workoutHistory.length > 0) {
+                      // Get completed dates to avoid overwriting finished workouts
+                      const today = new Date();
+                      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                      const completedDatesSet = new Set<string>();
+                      
+                      workoutHistory.forEach((session: any) => {
+                        if (session.startedAt) {
+                          const date = new Date(session.startedAt);
+                          const year = date.getFullYear();
+                          const month = String(date.getMonth() + 1).padStart(2, '0');
+                          const day = String(date.getDate()).padStart(2, '0');
+                          const dateStr = `${year}-${month}-${day}`;
+                          completedDatesSet.add(dateStr);
+                        }
+                      });
+                      
+                      // Merge workout days: keep existing days that are completed, use new AI days for others
+                      mergedWorkoutDays = aiPlan.workoutDays.map(newDay => {
+                        // Check if this day is today and if today is completed
+                        const dayIndex = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(newDay.dayName || '');
+                        const isToday = dayIndex === today.getDay();
+                        const isTodayCompleted = completedDatesSet.has(todayStr);
+                        
+                        // If this is today and it's completed, keep the existing workout day
+                        if (isToday && isTodayCompleted) {
+                          const existingDay = existingPlan.workoutDays?.find(d => d.dayName === newDay.dayName);
+                          if (existingDay) {
+                            if (__DEV__) console.log('🔒 Preserving completed workout for today');
+                            return existingDay; // Preserve completed workout
+                          }
+                        }
+                        
+                        // Otherwise, use the new AI-generated day
+                        return newDay;
+                      });
+                    }
+                  } catch (error) {
+                    if (__DEV__) console.warn('⚠️ Could not preserve completed workouts:', error);
+                    // If there's an error, just use the AI-generated days without merging
+                    mergedWorkoutDays = aiPlan.workoutDays;
+                  }
+                  
                   const updatedPlan = {
                     ...aiPlan,
                     id: existingPlan.id, // Keep the same ID
                     createdAt: existingPlan.createdAt, // Keep original creation date
                     updatedAt: new Date(), // Update timestamp
+                    workoutDays: mergedWorkoutDays, // Use merged days
                   };
                   
                   await syncUpdateWorkoutPlanToCloud(existingPlan.id, {

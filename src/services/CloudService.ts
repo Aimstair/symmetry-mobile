@@ -318,6 +318,11 @@ class CloudExerciseService implements IExerciseService {
 
 class CloudWorkoutService implements IWorkoutService {
   async getWorkoutPlans(userId: string): Promise<WorkoutPlan[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     // Deep select: Plan -> Days -> Exercises (with exercise catalog data)
     const { data, error } = await supabase
       .from('workout_plans')
@@ -364,7 +369,47 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async createWorkoutPlan(input: CreateWorkoutPlanInput): Promise<WorkoutPlan> {
-    // Transaction: Create Plan -> Create Days -> Create Exercises
+    // Skip cloud insert for guest users - return a local plan
+    if (input.userId.startsWith('guest-')) {
+      const planId = `plan-${Date.now()}`;
+      const localPlan: WorkoutPlan = {
+        id: planId,
+        userId: input.userId,
+        name: input.name,
+        description: input.description,
+        type: input.type,
+        daysPerWeek: input.daysPerWeek,
+        workoutDays: input.workoutDays.map((day, dayIndex) => {
+          const dayId = `day-${Date.now()}-${dayIndex}`;
+          return {
+            id: dayId,
+            planId: planId,
+            orderIndex: dayIndex,
+            name: day.name,
+            muscleGroups: day.muscleGroups,
+            exercises: day.exercises.map((ex, exIndex) => ({
+              id: `ex-${Date.now()}-${exIndex}`,
+              workoutDayId: dayId,
+              exerciseId: ex.exerciseId,
+              orderIndex: exIndex,
+              targetSets: ex.targetSets,
+              targetReps: ex.targetReps,
+              restSeconds: ex.restSeconds,
+              notes: ex.notes,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            })),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+        }),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      return localPlan;
+    }
+    
+    // Transaction: Create Plan -> Create Days -> Exercises
     
     // 1. Create the plan
     const { data: planData, error: planError } = await supabase
@@ -424,6 +469,17 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async updateWorkoutPlan(id: string, updates: Partial<WorkoutPlan>): Promise<WorkoutPlan> {
+    // Skip cloud update for guest users - return merged updates
+    if (id.startsWith('plan-')) {
+      // Guest plan - return a fake updated plan (would be handled by local store)
+      return {
+        id,
+        ...updates,
+        createdAt: updates.createdAt || new Date(),
+        updatedAt: new Date(),
+      } as WorkoutPlan;
+    }
+    
     const dbUpdates: any = {};
     if (updates.name) dbUpdates.name = updates.name;
     if (updates.description !== undefined) dbUpdates.description = updates.description;
@@ -483,6 +539,11 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async deleteWorkoutPlan(id: string): Promise<void> {
+    // Skip cloud delete for guest users
+    if (id.startsWith('plan-')) {
+      return;
+    }
+    
     const { error } = await supabase
       .from('workout_plans')
       .delete()
@@ -492,6 +553,21 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async addWorkoutDay(planId: string, day: Omit<WorkoutDay, 'id' | 'planId' | 'createdAt' | 'updatedAt'>): Promise<WorkoutDay> {
+    // Skip cloud insert for guest users
+    if (planId.startsWith('plan-')) {
+      const localDay: WorkoutDay = {
+        id: `day-${Date.now()}`,
+        planId: planId,
+        orderIndex: day.orderIndex,
+        name: day.name,
+        muscleGroups: day.muscleGroups,
+        exercises: day.exercises || [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      return localDay;
+    }
+    
     const { data, error } = await supabase
       .from('workout_days')
       .insert({
@@ -685,6 +761,48 @@ class CloudWorkoutService implements IWorkoutService {
 
 class CloudHistoryService implements IHistoryService {
   async saveWorkoutSession(input: SaveWorkoutSessionInput): Promise<WorkoutSession> {
+    // Skip cloud save for guest users - return a local session
+    if (input.userId.startsWith('guest-')) {
+      const sessionId = `session-${Date.now()}`;
+      const localSession: WorkoutSession = {
+        id: sessionId,
+        userId: input.userId,
+        planId: input.planId,
+        workoutDayId: input.workoutDayId,
+        name: input.name,
+        startedAt: input.startedAt,
+        endedAt: input.endedAt,
+        durationSeconds: input.endedAt ? Math.floor((input.endedAt.getTime() - input.startedAt.getTime()) / 1000) : undefined,
+        notes: input.notes,
+        warmupMode: input.warmupMode,
+        deloadMode: input.deloadMode,
+        exercises: input.exercises.map((ex, exIndex) => {
+          const sessionExId = `session-ex-${Date.now()}-${exIndex}`;
+          return {
+            id: sessionExId,
+            sessionId: sessionId,
+            exerciseId: ex.exerciseId,
+            orderIndex: exIndex,
+            notes: ex.notes,
+            sets: ex.sets.map((set, setIndex) => ({
+              id: `set-${Date.now()}-${exIndex}-${setIndex}`,
+              sessionExerciseId: sessionExId,
+              setNumber: setIndex + 1,
+              weight: set.weight,
+              reps: set.reps,
+              rpe: set.rpe,
+              isWarmup: set.isWarmup,
+              isCompleted: set.isCompleted,
+              restTakenSeconds: set.restTakenSeconds,
+              createdAt: new Date(),
+            })),
+          };
+        }),
+        createdAt: new Date(),
+      };
+      return localSession;
+    }
+    
     // Calculate duration if both times provided
     let durationSeconds: number | undefined;
     if (input.startedAt && input.endedAt) {
@@ -757,6 +875,11 @@ class CloudHistoryService implements IHistoryService {
     userId: string,
     options?: { limit?: number; offset?: number; startDate?: Date; endDate?: Date }
   ): Promise<WorkoutSession[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     let query = supabase
       .from('workout_sessions')
       .select(`
@@ -1096,6 +1219,11 @@ class CloudProgressService implements IProgressService {
 
   // Legacy methods for backwards compatibility
   async getBodyMeasurements(userId: string): Promise<BodyMeasurement[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const { data, error } = await supabase
       .from('body_measurements')
       .select('*')
@@ -1115,6 +1243,11 @@ class CloudProgressService implements IProgressService {
   }
 
   async addBodyMeasurement(measurement: BodyMeasurement): Promise<BodyMeasurement> {
+    // Skip cloud insert for guest users - return the input as-is
+    if (measurement.userId.startsWith('guest-')) {
+      return measurement;
+    }
+    
     const { data, error } = await supabase
       .from('body_measurements')
       .insert({
@@ -1141,6 +1274,11 @@ class CloudProgressService implements IProgressService {
   }
 
   async getPhysiqueScans(userId: string): Promise<PhysiqueScan[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const { data, error } = await supabase
       .from('physique_scans')
       .select('*')
@@ -1161,6 +1299,11 @@ class CloudProgressService implements IProgressService {
   }
 
   async addPhysiqueScan(scan: PhysiqueScan): Promise<PhysiqueScan> {
+    // Skip cloud insert for guest users - return the input as-is
+    if (scan.userId.startsWith('guest-')) {
+      return scan;
+    }
+    
     const { data, error } = await supabase
       .from('physique_scans')
       .insert({
@@ -1189,6 +1332,11 @@ class CloudProgressService implements IProgressService {
   }
 
   async getCardioLogs(userId: string): Promise<CardioLog[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const { data, error } = await supabase
       .from('cardio_logs')
       .select('*')
@@ -1210,6 +1358,11 @@ class CloudProgressService implements IProgressService {
   }
 
   async addCardioLog(log: CardioLog): Promise<CardioLog> {
+    // Skip cloud insert for guest users - return the input as-is
+    if (log.userId.startsWith('guest-')) {
+      return log;
+    }
+    
     const { data, error } = await supabase
       .from('cardio_logs')
       .insert({
@@ -1248,6 +1401,14 @@ class CloudUserService implements IUserService {
   async getUser(userId: string): Promise<User | null> {
     if (__DEV__) {
       console.log('☁️ CloudService.getUser called for:', userId);
+    }
+    
+    // Skip cloud query for guest users (they only exist locally)
+    if (userId.startsWith('guest-')) {
+      if (__DEV__) {
+        console.log('☁️ Guest user detected - skipping cloud query');
+      }
+      return null;
     }
     
     try {
@@ -1324,6 +1485,11 @@ class CloudUserService implements IUserService {
   }
 
   async getNutritionTargets(userId: string): Promise<NutritionTargets | null> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return null;
+    }
+    
     const { data, error } = await supabase
       .from('nutrition_targets')
       .select('*')
@@ -1347,6 +1513,11 @@ class CloudUserService implements IUserService {
   }
 
   async getEquipment(userId: string): Promise<EquipmentProfile | null> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return null;
+    }
+    
     const { data, error } = await supabase
       .from('equipment_profiles')
       .select('*')
@@ -1437,6 +1608,24 @@ class CloudUserService implements IUserService {
   }
 
   async updateUser(userId: string, updates: Partial<User>): Promise<User> {
+    // Skip cloud update for guest users - return merged updates
+    if (userId.startsWith('guest-')) {
+      return {
+        id: userId,
+        name: updates.name || '',
+        email: updates.email || '',
+        age: updates.age || 0,
+        gender: updates.gender || 'male',
+        height: updates.height || 0,
+        weight: updates.weight || 0,
+        goal: updates.goal || 'maintenance',
+        experienceLevel: updates.experienceLevel || 'beginner',
+        trainingDays: updates.trainingDays || [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+    }
+    
     const dbUpdates: any = {};
     if (updates.name) dbUpdates.name = updates.name;
     if (updates.email) dbUpdates.email = updates.email;
@@ -1474,6 +1663,11 @@ class CloudUserService implements IUserService {
   }
 
   async updateNutritionTargets(userId: string, targets: NutritionTargets): Promise<NutritionTargets> {
+    // Skip cloud update for guest users - return the input as-is
+    if (userId.startsWith('guest-')) {
+      return targets;
+    }
+    
     const { data, error } = await supabase
       .from('nutrition_targets')
       .upsert({
@@ -1539,6 +1733,11 @@ class CloudScheduleService implements IScheduleService {
     startDate: Date,
     endDate: Date
   ): Promise<ScheduledWorkout[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const startStr = startDate.toISOString().split('T')[0];
     const endStr = endDate.toISOString().split('T')[0];
 
@@ -1562,6 +1761,11 @@ class CloudScheduleService implements IScheduleService {
    * Get scheduled workout for a specific date
    */
   async getScheduledWorkout(userId: string, date: Date): Promise<ScheduledWorkout | null> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return null;
+    }
+    
     const dateStr = date.toISOString().split('T')[0];
 
     const { data, error } = await supabase
@@ -1588,6 +1792,21 @@ class CloudScheduleService implements IScheduleService {
     workoutPlanId: string | null,
     workoutSnapshot: WorkoutDaySnapshot
   ): Promise<ScheduledWorkout> {
+    // Skip cloud save for guest users - return local schedule
+    if (userId.startsWith('guest-')) {
+      const localSchedule: ScheduledWorkout = {
+        id: `schedule-${Date.now()}`,
+        userId: userId,
+        scheduledDate: date,
+        workoutPlanId: workoutPlanId ?? undefined,
+        workoutSnapshot: workoutSnapshot,
+        status: 'scheduled' as ScheduleStatus,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      return localSchedule;
+    }
+    
     const dateStr = date.toISOString().split('T')[0];
 
     const { data, error } = await supabase
@@ -1622,6 +1841,22 @@ class CloudScheduleService implements IScheduleService {
     status: ScheduleStatus,
     sessionId?: string
   ): Promise<ScheduledWorkout> {
+    // Skip cloud update for guest users
+    if (scheduleId.startsWith('schedule-')) {
+      // Return a fake updated schedule for guest
+      const localSchedule: ScheduledWorkout = {
+        id: scheduleId,
+        userId: 'guest-unknown',
+        scheduledDate: new Date(),
+        status: status,
+        sessionId: sessionId,
+        workoutSnapshot: { name: '', muscleGroups: [], exercises: [] },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      return localSchedule;
+    }
+    
     const updates: any = { status };
     if (sessionId) {
       updates.session_id = sessionId;
@@ -1646,6 +1881,11 @@ class CloudScheduleService implements IScheduleService {
    * Delete a scheduled workout
    */
   async deleteScheduledWorkout(scheduleId: string): Promise<void> {
+    // Skip cloud delete for guest users
+    if (scheduleId.startsWith('schedule-')) {
+      return;
+    }
+    
     const { error } = await supabase
       .from('workout_schedule')
       .delete()
@@ -1661,6 +1901,11 @@ class CloudScheduleService implements IScheduleService {
    * Get training days history for a specific week
    */
   async getTrainingDaysForWeek(userId: string, weekStart: Date): Promise<string[]> {
+    // Skip cloud query for guest users
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const weekStartStr = weekStart.toISOString().split('T')[0];
 
     const { data, error } = await supabase
@@ -1683,6 +1928,11 @@ class CloudScheduleService implements IScheduleService {
    * Save training days snapshot for current week
    */
   async saveTrainingDaysSnapshot(userId: string, trainingDays: string[]): Promise<void> {
+    // Skip cloud save for guest users
+    if (userId.startsWith('guest-')) {
+      return;
+    }
+    
     // Get Monday of current week
     const now = new Date();
     const dayOfWeek = now.getDay();

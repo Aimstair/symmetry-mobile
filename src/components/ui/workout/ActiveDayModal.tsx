@@ -29,6 +29,15 @@ export function ActiveDayModal({ open, onOpenChange, dayName, onConfirm }: Activ
   const [selectedMuscles, setSelectedMuscles] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Reset form when modal opens with new dayName
+  React.useEffect(() => {
+    if (open && dayName) {
+      setWorkoutName(`${dayName} Workout`);
+      setSelectedMuscles([]);
+      setIsSubmitting(false);
+    }
+  }, [open, dayName]);
+
   const toggleMuscle = (muscleId: string) => {
     setSelectedMuscles((prev) =>
       prev.includes(muscleId)
@@ -37,19 +46,24 @@ export function ActiveDayModal({ open, onOpenChange, dayName, onConfirm }: Activ
     );
   };
 
-  const handleConfirm = () => {
-    if (!workoutName.trim() || selectedMuscles.length === 0) return;
-    setIsSubmitting(true);
-    onConfirm(workoutName.trim(), selectedMuscles);
-    // Reset after confirm
-    setIsSubmitting(false);
-    setWorkoutName('');
-    setSelectedMuscles([]);
+  const handleConfirm = async () => {
+    if (!workoutName.trim() || selectedMuscles.length === 0 || isSubmitting) return;
+    
+    try {
+      setIsSubmitting(true);
+      await onConfirm(workoutName.trim(), selectedMuscles);
+      // Modal will be closed by the parent component after successful confirmation
+    } catch (error) {
+      console.error('Error creating workout day:', error);
+      setIsSubmitting(false);
+    }
   };
 
   const handleClose = () => {
+    if (isSubmitting) return; // Prevent closing while submitting
     setWorkoutName('');
     setSelectedMuscles([]);
+    setIsSubmitting(false);
     onOpenChange(false);
   };
 

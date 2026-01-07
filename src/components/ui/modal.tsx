@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, Modal as RNModal, Pressable, ScrollView } from 'react-native';
+import { View, Text, Modal as RNModal, Pressable, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, TouchableOpacity } from 'react-native';
 import { X } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
+
 
 interface ModalProps {
   open: boolean;
@@ -10,19 +11,79 @@ interface ModalProps {
 }
 
 export function Modal({ open, onOpenChange, children }: ModalProps) {
+  if (!open) return null;
+  
   return (
     <RNModal
-      visible={open}
+      visible={true}
       transparent
       animationType="fade"
       onRequestClose={() => onOpenChange(false)}
+      statusBarTranslucent
     >
-      <View className="flex-1 bg-black/80 items-center justify-center px-4">
-        {children}
+      <View style={styles.container}>
+        {/* Backdrop - tapping this closes the modal */}
+        <TouchableOpacity 
+          activeOpacity={1}
+          style={styles.backdrop}
+          onPress={() => onOpenChange(false)}
+        />
+        
+        {/* Content Container - sits above backdrop */}
+        <View style={styles.contentPosition}>
+          <KeyboardAvoidingView 
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={styles.keyboardView}
+          >
+            <View style={styles.contentWrapper}>
+              <ScrollView 
+                contentContainerStyle={styles.scrollContent}
+                showsVerticalScrollIndicator={false}
+                bounces={false}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled={true}
+              >
+                {children}
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
       </View>
     </RNModal>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+  },
+  contentPosition: {
+    width: '100%',
+    maxWidth: 500,
+    paddingHorizontal: 16,
+    maxHeight: '90%',
+  },
+  keyboardView: {
+    width: '100%',
+  },
+  contentWrapper: {
+    width: '100%',
+    backgroundColor: '#18181B',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#27272A',
+    overflow: 'hidden',
+  },
+  scrollContent: {
+    padding: 24,
+  },
+});
 
 interface ModalContentProps {
   children: React.ReactNode;
@@ -31,13 +92,8 @@ interface ModalContentProps {
 
 export function ModalContent({ children, className }: ModalContentProps) {
   return (
-    <View className={cn(
-      'bg-card border border-border rounded-xl w-full max-w-lg p-6',
-      className
-    )}>
-      <ScrollView className="max-h-[80vh]" showsVerticalScrollIndicator={false}>
-        {children}
-      </ScrollView>
+    <View className={cn('w-full', className)}>
+      {children}
     </View>
   );
 }

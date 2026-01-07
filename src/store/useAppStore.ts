@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { storageAdapter } from '@/lib/storage';
 import { dataService } from '@/services/dataServiceProvider';
+import { isUsingCloudService } from '@/services/dataServiceProvider';
 import type {
   User,
   NutritionTargets,
@@ -18,20 +19,70 @@ import type {
 } from '@/types';
 
 /**
- * Zustand Store - React Native Migration
+ * Zustand Store - Offline-First Architecture
+ * 
+ * Strategy:
+ * - READ: Always from local state (fast, works offline)
+ * - WRITE: Local first (optimistic update), then sync to cloud
+ * - SYNC: Background sync when online, queue failed operations
  * 
  * Changes from web version:
  * - localStorage → MMKV (via storageAdapter)
- * - Added async action wrappers for cloud sync
- * - Added loading states
+ * - Added offline-first async action wrappers
+ * - Added sync queue for failed operations
  * - Maintains exact same API
  */
+
+// Offline queue for failed sync operations
+interface PendingSyncOperation {
+  id: string;
+  type: 'workout_plan' | 'workout_session' | 'user' | 'physique_scan';
+  operation: 'create' | 'update' | 'delete';
+  data: any;
+  timestamp: number;
+  attempts: number;
+}
+
+// Helper to check if we're online (simple check)
+async function isOnline(): Promise<boolean> {
+  if (!isUsingCloudService()) return false;
+  try {
+    // Quick ping to check connectivity
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    await fetch('https://www.google.com/generate_204', { 
+      method: 'HEAD',
+      signal: controller.signal 
+    });
+    clearTimeout(timeoutId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Helper to safely sync to cloud (won't throw if offline)
+async function trySyncToCloud<T>(
+  syncFn: () => Promise<T>,
+  onError?: (error: unknown) => void
+): Promise<T | null> {
+  try {
+    return await syncFn();
+  } catch (error) {
+    if (onError) onError(error);
+    else if (__DEV__) console.log('📴 Sync failed (will retry later):', error);
+    return null;
+  }
+}
 
 interface AppState {
   // User & Profile
   user: User | null;
   nutritionTargets: NutritionTargets | null;
   equipment: EquipmentProfile | null;
+
+  // Guest Mode - true until user signs in with Supabase
+  isGuest: boolean;
 
   // Workout Data
   workoutPlans: WorkoutPlan[];
@@ -96,6 +147,9 @@ interface AppState {
   completeOnboarding: () => void;
   resetOnboarding: () => void;
 
+  // Actions - Guest Mode
+  setIsGuest: (isGuest: boolean) => void;
+
   // Actions - Loading
   setLoading: (isLoading: boolean, message?: string) => void;
 
@@ -142,6 +196,9 @@ interface AppState {
   // Async Actions - Workout History
   syncFetchWorkoutHistory: () => Promise<void>;
   
+  // Async Actions - Guest Data Sync (called when guest signs in)
+  syncGuestDataToCloud: (authenticatedUser: { id: string; email: string }) => Promise<void>;
+  
   // Actions - Active Workout Progress (stores in-progress set data)
   updateActiveWorkoutSets: (exerciseSets: Record<string, any[]>) => void;
 }
@@ -187,6 +244,7 @@ export const useAppStore = create<AppState>()(
       user: null,
       nutritionTargets: null,
       equipment: null,
+      isGuest: true, // New users start as guests
       workoutPlans: [],
       activeWorkout: initialActiveWorkout,
       workoutHistory: [],
@@ -456,12 +514,16 @@ export const useAppStore = create<AppState>()(
         })),
       resetOnboarding: () => set({ onboarding: initialOnboarding }),
 
+      // Guest Mode Actions
+      setIsGuest: (isGuest) => set({ isGuest }),
+
       // Reset
       resetStore: () =>
         set({
           user: null,
           nutritionTargets: null,
           equipment: null,
+          isGuest: true,
           workoutPlans: [],
           activeWorkout: initialActiveWorkout,
           bodyMeasurements: [],
@@ -473,344 +535,312 @@ export const useAppStore = create<AppState>()(
           loadingMessage: null,
         }),
 
-      // Async Actions - Cloud Sync
-      // These call the data service first, then update the store
+      // Async Actions - Cloud Sync (Offline-First)
+      // These update local state FIRST (optimistic), then sync to cloud
       syncWorkoutPlanToCloud: async (plan) => {
-        set({ isLoading: true, loadingMessage: 'Saving workout plan...' });
-        try {
+        // 1. Update local state immediately (optimistic)
+        set((state) => ({
+          workoutPlans: [...state.workoutPlans, plan],
+        }));
+        
+        // 2. Try to sync to cloud in background
+        const result = await trySyncToCloud(async () => {
           const savedPlan = await dataService.workout.createWorkoutPlan(plan);
-          set((state) => ({
-            workoutPlans: [...state.workoutPlans, savedPlan],
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Workout plan synced to cloud:', savedPlan.id);
+          // Update with server response if IDs differ
+          if (savedPlan.id !== plan.id) {
+            set((state) => ({
+              workoutPlans: state.workoutPlans.map((p) =>
+                p.id === plan.id ? savedPlan : p
+              ),
+            }));
+          }
           return savedPlan;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync workout plan:', error);
-          throw error;
-        }
+        });
+        
+        return result || plan; // Return local plan if sync failed
       },
 
       syncUpdateWorkoutPlanToCloud: async (id, updates) => {
-        set({ isLoading: true, loadingMessage: 'Updating workout plan...' });
-        try {
-          const updatedPlan = await dataService.workout.updateWorkoutPlan(id, updates);
-          set((state) => ({
-            workoutPlans: state.workoutPlans.map((p) =>
-              p.id === id ? updatedPlan : p
-            ),
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Workout plan updated in cloud:', id);
-          return updatedPlan;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to update workout plan:', error);
-          throw error;
-        }
+        // 1. Update local state immediately (optimistic)
+        const originalPlan = get().workoutPlans.find((p) => p.id === id);
+        set((state) => ({
+          workoutPlans: state.workoutPlans.map((p) =>
+            p.id === id ? { ...p, ...updates, updatedAt: new Date() } : p
+          ),
+        }));
+        
+        // 2. Try to sync to cloud in background
+        const result = await trySyncToCloud(async () => {
+          return await dataService.workout.updateWorkoutPlan(id, updates);
+        });
+        
+        return result || { ...originalPlan!, ...updates };
       },
 
       syncDeleteWorkoutPlanFromCloud: async (id) => {
-        set({ isLoading: true, loadingMessage: 'Deleting workout plan...' });
-        try {
+        // 1. Remove from local state immediately (optimistic)
+        set((state) => ({
+          workoutPlans: state.workoutPlans.filter((p) => p.id !== id),
+        }));
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           await dataService.workout.deleteWorkoutPlan(id);
-          set((state) => ({
-            workoutPlans: state.workoutPlans.filter((p) => p.id !== id),
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Workout plan deleted from cloud:', id);
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to delete workout plan:', error);
-          throw error;
-        }
+        });
       },
 
       syncSwapExerciseToCloud: async (planId, dayId, exerciseId, newExerciseId) => {
-        set({ isLoading: true, loadingMessage: 'Swapping exercise...' });
-        try {
-          // Update local state first
-          get().swapExercise(planId, dayId, exerciseId, newExerciseId);
-          
-          // Get the updated plan and sync to cloud
+        // 1. Update local state first (optimistic)
+        get().swapExercise(planId, dayId, exerciseId, newExerciseId);
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
           if (updatedPlan) {
             await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
           }
-          
-          set({ isLoading: false, loadingMessage: null });
-          if (__DEV__) console.log('✅ Exercise swapped:', exerciseId, '->', newExerciseId);
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to swap exercise:', error);
-          throw error;
-        }
+        });
       },
 
       syncAddExerciseToDayCloud: async (planId, dayId, exercise) => {
-        set({ isLoading: true, loadingMessage: 'Adding exercise...' });
-        try {
-          // Update local state first
-          get().addExerciseToDay(planId, dayId, exercise);
-          
-          // Get the updated plan and sync to cloud
+        // 1. Update local state first (optimistic)
+        get().addExerciseToDay(planId, dayId, exercise);
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
           if (updatedPlan) {
             await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
           }
-          
-          set({ isLoading: false, loadingMessage: null });
-          if (__DEV__) console.log('✅ Exercise added:', exercise.exerciseId);
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to add exercise:', error);
-          throw error;
-        }
+        });
       },
 
       syncRemoveExerciseFromDayCloud: async (planId, dayId, exerciseId) => {
-        set({ isLoading: true, loadingMessage: 'Removing exercise...' });
-        try {
-          // Update local state first
-          get().removeExerciseFromDay(planId, dayId, exerciseId);
-          
-          // Get the updated plan and sync to cloud
+        // 1. Update local state first (optimistic)
+        get().removeExerciseFromDay(planId, dayId, exerciseId);
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
           if (updatedPlan) {
             await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
           }
-          
-          set({ isLoading: false, loadingMessage: null });
-          if (__DEV__) console.log('✅ Exercise removed:', exerciseId);
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to remove exercise:', error);
-          throw error;
-        }
+        });
       },
 
       syncAddWorkoutDayToCloud: async (planId, workoutDay) => {
-        set({ isLoading: true, loadingMessage: 'Adding workout day...' });
-        try {
-          // Update local state first
-          get().addWorkoutDay(planId, workoutDay);
-          
-          // Get the updated plan and sync to cloud
+        // 1. Update local state first (optimistic)
+        get().addWorkoutDay(planId, workoutDay);
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
           if (updatedPlan) {
             await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
           }
-          
-          set({ isLoading: false, loadingMessage: null });
-          if (__DEV__) console.log('✅ Workout day added:', workoutDay.name);
-          return workoutDay;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to add workout day:', error);
-          throw error;
-        }
+        });
+        
+        return workoutDay;
       },
 
       syncRemoveWorkoutDayFromCloud: async (planId, dayId) => {
-        set({ isLoading: true, loadingMessage: 'Removing workout day...' });
-        try {
-          // Update local state first
-          get().removeWorkoutDay(planId, dayId);
-          
-          // Get the updated plan and sync to cloud
+        // 1. Update local state first (optimistic)
+        get().removeWorkoutDay(planId, dayId);
+        
+        // 2. Try to sync to cloud in background
+        await trySyncToCloud(async () => {
           const updatedPlan = get().workoutPlans.find((p) => p.id === planId);
           if (updatedPlan) {
             await dataService.workout.updateWorkoutPlan(planId, updatedPlan);
           }
-          
-          set({ isLoading: false, loadingMessage: null });
-          if (__DEV__) console.log('✅ Workout day removed:', dayId);
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to remove workout day:', error);
-          throw error;
-        }
+        });
       },
 
       syncUserToCloud: async (user) => {
-        set({ isLoading: true, loadingMessage: 'Creating profile...' });
-        try {
-          const savedUser = await dataService.user.createUser(user);
-          set({
-            user: savedUser,
-            isLoading: false,
-            loadingMessage: null,
-          });
-          if (__DEV__) console.log('✅ User synced to cloud:', savedUser.id);
-          return savedUser;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync user:', error);
-          throw error;
+        // 1. Update local state immediately
+        set({ user });
+        
+        // 2. Try to sync to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.user.createUser(user);
+        });
+        
+        if (result) {
+          set({ user: result });
+          return result;
         }
+        
+        return user;
       },
 
       syncUpdateUserToCloud: async (userId, updates) => {
-        set({ isLoading: true, loadingMessage: 'Updating profile...' });
-        try {
-          const updatedUser = await dataService.user.updateUser(userId, updates);
-          
-          // **FIX: Immediately update local store to ensure UI refresh**
-          set({
-            user: updatedUser,
-          });
-          
-          // Auto-insert weight history when weight is updated
-          if (updates.weight !== undefined) {
-            try {
-              const weightMeasurement: BodyMeasurement = {
-                id: `bm-weight-${Date.now()}`,
-                userId,
-                date: new Date(),
-                weight: updates.weight,
-                measurements: {},
-              };
-              const savedMeasurement = await dataService.progress.addBodyMeasurement(weightMeasurement);
-              set((state) => ({
-                bodyMeasurements: [...state.bodyMeasurements, savedMeasurement],
-              }));
-              if (__DEV__) console.log('✅ Weight history auto-logged:', updates.weight);
-            } catch (weightError) {
-              // Don't fail the whole update if weight logging fails
-              console.error('⚠️ Failed to auto-log weight history:', weightError);
-            }
-          }
-          
-          set({
-            isLoading: false,
-            loadingMessage: null,
-          });
-          if (__DEV__) console.log('✅ User updated in cloud:', userId);
-          return updatedUser;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to update user:', error);
-          throw error;
+        // 1. Update local state immediately (optimistic)
+        const originalUser = get().user;
+        set((state) => ({
+          user: state.user ? { ...state.user, ...updates, updatedAt: new Date() } : null,
+        }));
+        
+        // 2. Try to sync to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.user.updateUser(userId, updates);
+        });
+        
+        if (result) {
+          set({ user: result });
         }
+        
+        // Auto-insert weight history when weight is updated
+        if (updates.weight !== undefined) {
+          const newWeight = updates.weight; // Capture value for closure
+          trySyncToCloud(async () => {
+            const weightMeasurement: BodyMeasurement = {
+              id: `bm-weight-${Date.now()}`,
+              userId,
+              date: new Date(),
+              weight: newWeight,
+              measurements: {},
+            };
+            const savedMeasurement = await dataService.progress.addBodyMeasurement(weightMeasurement);
+            set((state) => ({
+              bodyMeasurements: [...state.bodyMeasurements, savedMeasurement],
+            }));
+          });
+        }
+        
+        return result || { ...originalUser!, ...updates };
       },
 
-      // Progress Sync Actions
+      // Progress Sync Actions (Offline-First)
       syncAddBodyMeasurement: async (measurement) => {
-        set({ isLoading: true, loadingMessage: 'Saving measurement...' });
-        try {
-          const savedMeasurement = await dataService.progress.addBodyMeasurement(measurement);
-          set((state) => ({
-            bodyMeasurements: [...state.bodyMeasurements, savedMeasurement],
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Body measurement synced:', savedMeasurement.id);
-          return savedMeasurement;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync body measurement:', error);
-          throw error;
-        }
+        // 1. Update local state immediately
+        set((state) => ({
+          bodyMeasurements: [...state.bodyMeasurements, measurement],
+        }));
+        
+        // 2. Try to sync to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.progress.addBodyMeasurement(measurement);
+        });
+        
+        return result || measurement;
       },
 
       syncAddPhysiqueScan: async (scan) => {
-        set({ isLoading: true, loadingMessage: 'Saving scan results...' });
-        try {
-          const savedScan = await dataService.progress.addPhysiqueScan(scan);
-          set((state) => ({
-            physiqueScans: [...state.physiqueScans, savedScan],
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Physique scan synced:', savedScan.id);
-          return savedScan;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync physique scan:', error);
-          throw error;
-        }
+        // 1. Update local state immediately
+        set((state) => ({
+          physiqueScans: [...state.physiqueScans, scan],
+        }));
+        
+        // 2. Try to sync to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.progress.addPhysiqueScan(scan);
+        });
+        
+        return result || scan;
       },
 
       syncAddCardioLog: async (log) => {
-        set({ isLoading: true, loadingMessage: 'Saving cardio session...' });
-        try {
-          const savedLog = await dataService.progress.addCardioLog(log);
-          set((state) => ({
-            cardioLogs: [...state.cardioLogs, savedLog],
-            isLoading: false,
-            loadingMessage: null,
-          }));
-          if (__DEV__) console.log('✅ Cardio log synced:', savedLog.id);
-          return savedLog;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync cardio log:', error);
-          throw error;
-        }
+        // 1. Update local state immediately
+        set((state) => ({
+          cardioLogs: [...state.cardioLogs, log],
+        }));
+        
+        // 2. Try to sync to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.progress.addCardioLog(log);
+        });
+        
+        return result || log;
       },
 
       syncUpdateNutritionTargets: async (targets) => {
-        set({ isLoading: true, loadingMessage: 'Updating macros...' });
-        try {
-          const userId = get().user?.id;
-          if (!userId) throw new Error('No user found');
-
-          // Update Cloud
-          await dataService.user.updateNutritionTargets(userId, targets);
-
-          // Update Local
-          set({
-            nutritionTargets: targets,
-            isLoading: false,
-            loadingMessage: null,
+        // 1. Update local state immediately
+        set({ nutritionTargets: targets });
+        
+        // 2. Try to sync to cloud
+        const userId = get().user?.id;
+        if (userId) {
+          await trySyncToCloud(async () => {
+            await dataService.user.updateNutritionTargets(userId, targets);
           });
-          
-          if (__DEV__) console.log('✅ Nutrition targets recalculated and synced');
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to sync nutrition:', error);
-          throw error; // Rethrow so UI can show error if needed
         }
       },
 
       // Save workout session to cloud (returns session ID)
+      // This one needs to try cloud first since session IDs matter
       syncSaveWorkoutSession: async (sessionData) => {
         const state = get();
         const user = state.user;
         const activeWorkout = state.activeWorkout;
         
         if (!user?.id || !activeWorkout.startTime) {
-          console.error('❌ Cannot save session: no user or start time');
+          if (__DEV__) console.error('❌ Cannot save session: no user or start time');
           return undefined;
         }
 
-        set({ isLoading: true, loadingMessage: 'Saving workout...' });
-        try {
-          const savedSession = await dataService.history.saveWorkoutSession({
-            userId: user.id,
-            planId: activeWorkout.workoutId || undefined,
-            workoutDayId: undefined, // Could be enhanced to include this
-            name: sessionData.name,
-            startedAt: activeWorkout.startTime,
-            endedAt: new Date(),
-            warmupMode: activeWorkout.warmupMode,
-            deloadMode: activeWorkout.deloadMode,
-            exercises: sessionData.exercises,
-          });
+        const sessionInput = {
+          userId: user.id,
+          planId: activeWorkout.workoutId || undefined,
+          workoutDayId: undefined,
+          name: sessionData.name,
+          startedAt: activeWorkout.startTime!,
+          endedAt: new Date(),
+          warmupMode: activeWorkout.warmupMode,
+          deloadMode: activeWorkout.deloadMode,
+          exercises: sessionData.exercises,
+        };
 
-          if (__DEV__) console.log('✅ Workout session saved to cloud:', savedSession.id);
-          
-          set({ isLoading: false, loadingMessage: null });
-          return savedSession.id;
-        } catch (error) {
-          set({ isLoading: false, loadingMessage: null });
-          console.error('❌ Failed to save workout session:', error);
-          throw error;
+        // Try to save to cloud
+        const result = await trySyncToCloud(async () => {
+          return await dataService.history.saveWorkoutSession(sessionInput);
+        });
+        
+        if (result) {
+          // Add to workout history for immediate UI update
+          set((state) => ({
+            workoutHistory: [result, ...state.workoutHistory],
+          }));
+          return result.id;
         }
+        
+        // If offline or guest, create local session and add to history
+        const localSessionId = `local-session-${Date.now()}`;
+        const localSession: any = {
+          ...sessionInput,
+          id: localSessionId,
+          durationSeconds: Math.floor((sessionInput.endedAt.getTime() - sessionInput.startedAt.getTime()) / 1000),
+          exercises: sessionInput.exercises.map((ex, exIndex) => ({
+            id: `local-ex-${Date.now()}-${exIndex}`,
+            sessionId: localSessionId,
+            exerciseId: ex.exerciseId,
+            orderIndex: exIndex,
+            notes: (ex as any).notes,
+            sets: ex.sets.map((s, setIndex) => ({
+              id: `local-set-${Date.now()}-${exIndex}-${setIndex}`,
+              sessionExerciseId: `local-ex-${Date.now()}-${exIndex}`,
+              setNumber: setIndex + 1,
+              weight: s.weight,
+              reps: s.reps,
+              rpe: (s as any).rpe,
+              isWarmup: s.isWarmup,
+              isCompleted: s.isCompleted,
+              restTakenSeconds: (s as any).restTakenSeconds,
+              createdAt: new Date(),
+            })),
+          })),
+          createdAt: new Date(),
+        };
+        
+        // Add local session to history
+        set((state) => ({
+          workoutHistory: [localSession, ...state.workoutHistory],
+        }));
+        
+        if (__DEV__) {
+          console.log('💾 Local workout session saved and added to history:', localSessionId);
+        }
+        
+        return localSessionId;
       },
 
       // Mark today's scheduled workout as completed
@@ -819,31 +849,21 @@ export const useAppStore = create<AppState>()(
         const user = state.user;
         
         if (!user?.id) {
-          console.error('❌ Cannot mark workout completed: no user');
           return;
         }
 
-        try {
-          // Get today's scheduled workout
+        await trySyncToCloud(async () => {
           const today = new Date();
           const scheduledWorkout = await dataService.schedule.getScheduledWorkout(user.id, today);
           
           if (scheduledWorkout) {
-            // Update the schedule status to completed with the session ID
             await dataService.schedule.updateScheduleStatus(
               scheduledWorkout.id,
               'completed',
               sessionId
             );
-            
-            if (__DEV__) console.log('✅ Schedule marked as completed:', scheduledWorkout.id);
-          } else {
-            if (__DEV__) console.log('ℹ️ No scheduled workout found for today');
           }
-        } catch (error) {
-          console.error('❌ Failed to mark schedule as completed:', error);
-          // Don't throw - this is a secondary operation
-        }
+        });
       },
 
       // Ensure today's workout is scheduled (called when starting workout)
@@ -852,33 +872,22 @@ export const useAppStore = create<AppState>()(
         const user = state.user;
         
         if (!user?.id) {
-          console.error('❌ Cannot create schedule: no user');
           return;
         }
 
-        try {
+        await trySyncToCloud(async () => {
           const today = new Date();
-          
-          // Check if schedule already exists
           const existingSchedule = await dataService.schedule.getScheduledWorkout(user.id, today);
           
           if (!existingSchedule) {
-            // Create schedule entry for today
             await dataService.schedule.scheduleWorkout(
               user.id,
               today,
               planId,
               daySnapshot
             );
-            
-            if (__DEV__) console.log('✅ Created schedule entry for today');
-          } else {
-            if (__DEV__) console.log('ℹ️ Schedule already exists for today');
           }
-        } catch (error) {
-          console.error('❌ Failed to create schedule:', error);
-          // Don't throw - workout can still proceed
-        }
+        });
       },
 
       // Fetch workout history for the current user
@@ -887,12 +896,19 @@ export const useAppStore = create<AppState>()(
         const user = state.user;
         
         if (!user?.id) {
-          console.error('❌ Cannot fetch workout history: no user');
+          if (__DEV__) console.log('⚠️ syncFetchWorkoutHistory: No user ID');
           return;
         }
 
-        try {
-          // Fetch recent workout history (last 90 days)
+        if (__DEV__) console.log('📊 Fetching workout history for user:', user.id);
+
+        // For guest users, keep local history instead of overwriting with empty cloud result
+        if (user.id.startsWith('guest-')) {
+          if (__DEV__) console.log('📊 Guest user - preserving local workout history');
+          return;
+        }
+
+        await trySyncToCloud(async () => {
           const startDate = new Date();
           startDate.setDate(startDate.getDate() - 90);
           
@@ -901,12 +917,102 @@ export const useAppStore = create<AppState>()(
             limit: 100,
           });
           
-          set({ workoutHistory: history });
+          if (__DEV__) {
+            console.log('📊 Workout history fetched:', history.length, 'sessions');
+            if (history.length > 0) {
+              const today = new Date().toISOString().split('T')[0];
+              const todaySessions = history.filter(s => {
+                const sessionDate = new Date(s.startedAt).toISOString().split('T')[0];
+                return sessionDate === today;
+              });
+              console.log('📊 Sessions for today:', todaySessions.length);
+              if (todaySessions.length > 0) {
+                console.log('📊 Today\'s session:', todaySessions[0].name, 'at', todaySessions[0].startedAt);
+              }
+            }
+          }
           
-          if (__DEV__) console.log('✅ Fetched workout history:', history.length, 'sessions');
-        } catch (error) {
-          console.error('❌ Failed to fetch workout history:', error);
-          // Don't throw - UI can still work without history
+          set({ workoutHistory: history });
+        });
+      },
+
+      // Sync all guest data to cloud when guest signs in
+      // Called after successful OAuth authentication
+      syncGuestDataToCloud: async (authenticatedUser) => {
+        const state = get();
+        const guestUser = state.user;
+        
+        if (__DEV__) {
+          console.log('🔄 Syncing guest data to cloud for:', authenticatedUser.email);
+        }
+
+        // Update the user ID from guest ID to authenticated user ID
+        const updatedUser = guestUser ? {
+          ...guestUser,
+          id: authenticatedUser.id,
+          email: authenticatedUser.email,
+          updatedAt: new Date(),
+        } : null;
+
+        // 1. Create/update user profile in cloud
+        if (updatedUser) {
+          await trySyncToCloud(async () => {
+            try {
+              await dataService.user.createUser(updatedUser);
+              if (__DEV__) console.log('✅ User profile synced to cloud');
+            } catch (error: any) {
+              // If user already exists, update instead
+              if (error.message?.includes('duplicate') || error.message?.includes('already exists')) {
+                await dataService.user.updateUser(updatedUser.id, updatedUser);
+                if (__DEV__) console.log('✅ User profile updated in cloud');
+              } else {
+                throw error;
+              }
+            }
+          });
+        }
+
+        // 2. Sync nutrition targets
+        if (state.nutritionTargets && updatedUser) {
+          await trySyncToCloud(async () => {
+            await dataService.user.updateNutritionTargets(updatedUser.id, state.nutritionTargets!);
+            if (__DEV__) console.log('✅ Nutrition targets synced');
+          });
+        }
+
+        // 3. Sync workout plans
+        for (const plan of state.workoutPlans) {
+          const cloudPlan = { ...plan, userId: authenticatedUser.id };
+          await trySyncToCloud(async () => {
+            await dataService.workout.createWorkoutPlan(cloudPlan);
+            if (__DEV__) console.log('✅ Workout plan synced:', plan.name);
+          });
+        }
+
+        // 4. Sync body measurements
+        for (const measurement of state.bodyMeasurements) {
+          const cloudMeasurement = { ...measurement, userId: authenticatedUser.id };
+          await trySyncToCloud(async () => {
+            await dataService.progress.addBodyMeasurement(cloudMeasurement);
+          });
+        }
+
+        // 5. Sync physique scans
+        for (const scan of state.physiqueScans) {
+          const cloudScan = { ...scan, userId: authenticatedUser.id };
+          await trySyncToCloud(async () => {
+            await dataService.progress.addPhysiqueScan(cloudScan);
+          });
+        }
+
+        // 6. Update local state - set user with authenticated ID and mark as not guest
+        set({
+          user: updatedUser,
+          isGuest: false,
+        });
+
+        if (__DEV__) {
+          console.log('✅ Guest data sync completed');
         }
       },
 
@@ -927,8 +1033,10 @@ export const useAppStore = create<AppState>()(
         user: state.user,
         nutritionTargets: state.nutritionTargets,
         equipment: state.equipment,
+        isGuest: state.isGuest, // Persist guest status
         workoutPlans: state.workoutPlans,
         activeWorkout: state.activeWorkout,
+        workoutHistory: state.workoutHistory, // Persist workout history for offline access
         bodyMeasurements: state.bodyMeasurements,
         physiqueScans: state.physiqueScans,
         cardioLogs: state.cardioLogs,

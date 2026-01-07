@@ -90,12 +90,24 @@ export default function WorkoutPlanScreen() {
     const dates = new Set<string>();
     workoutHistory.forEach((session: any) => {
       if (session.startedAt) {
-        // Convert to ISO date string (YYYY-MM-DD)
+        // Convert to local date string (YYYY-MM-DD) to avoid UTC timezone shift
         const date = new Date(session.startedAt);
-        const dateStr = date.toISOString().split('T')[0];
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const dateStr = `${year}-${month}-${day}`;
         dates.add(dateStr);
       }
     });
+    
+    if (__DEV__) {
+      console.log('📅 Completed dates calculated:', Array.from(dates));
+      console.log('📅 Total workout history sessions:', workoutHistory.length);
+      const today = new Date();
+      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      console.log('📅 Is today completed?', dates.has(todayStr));
+    }
+    
     return dates;
   }, [workoutHistory]);
 
@@ -171,7 +183,10 @@ export default function WorkoutPlanScreen() {
 
   // Handler: Confirm active day creation from modal
   const handleConfirmActiveDay = useCallback(async (workoutName: string, muscleGroups: string[]) => {
-    if (!user || !activePlan) return;
+    if (!user || !activePlan) {
+      Alert.alert('Error', 'User or workout plan not found');
+      return;
+    }
     
     // Normalize the day name to ensure consistent format (e.g., 'Thu' -> 'Thursday')
     const dayName = normalizeDayName(pendingActiveDayName);
@@ -222,12 +237,19 @@ export default function WorkoutPlanScreen() {
         console.log('📅 Workout day created:', newWorkoutDay.name, 'for', dayName);
       }
       
+      // Close modal and reset state after successful operation
       setShowActiveDayModal(false);
       setPendingActiveDayName('');
-      Alert.alert('Day Activated', `${dayName} is now an active training day! Add exercises from the workout screen.`);
+      
+      // Show success alert
+      setTimeout(() => {
+        Alert.alert('Day Activated', `${dayName} is now an active training day! Add exercises from the workout screen.`);
+      }, 100);
     } catch (error) {
       console.error('Failed to make active day:', error);
       Alert.alert('Error', 'Failed to activate day. Please try again.');
+      // Don't close modal on error so user can retry
+      throw error; // Re-throw to let modal know there was an error
     }
   }, [user, activePlan, trainingDays, pendingActiveDayName, syncUpdateUserToCloud, syncAddWorkoutDayToCloud]);
 
@@ -287,6 +309,52 @@ export default function WorkoutPlanScreen() {
     }
     return selectedWorkout.workoutDay.exercises;
   }, [selectedWorkout]);
+
+  // Get actual completed session data for the selected day
+  const completedSessionData = useMemo(() => {
+    if (selectedWorkout?.status !== 'completed') return null;
+    
+    // Find session for this specific date
+    const year = selectedWorkout.fullDate.getFullYear();
+    const month = String(selectedWorkout.fullDate.getMonth() + 1).padStart(2, '0');
+    const day = String(selectedWorkout.fullDate.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
+    const session = workoutHistory.find((s: any) => {
+      if (s.startedAt) {
+        const sessionDate = new Date(s.startedAt);
+        const sessionYear = sessionDate.getFullYear();
+        const sessionMonth = String(sessionDate.getMonth() + 1).padStart(2, '0');
+        const sessionDay = String(sessionDate.getDate()).padStart(2, '0');
+        const sessionDateStr = `${sessionYear}-${sessionMonth}-${sessionDay}`;
+        return sessionDateStr === dateStr;
+      }
+      return false;
+    });
+    
+    if (!session) return null;
+    
+    // Calculate stats from actual session
+    const totalSets = session.exercises?.reduce((sum: number, ex: any) => sum + (ex.sets?.length || 0), 0) || 0;
+    const totalVolume = session.exercises?.reduce((sum: number, ex: any) => {
+      return sum + (ex.sets?.reduce((setSum: number, set: any) => {
+        return setSum + ((set.weight || 0) * (set.reps || 0));
+      }, 0) || 0);
+    }, 0) || 0;
+    
+    const durationSeconds = session.durationSeconds || 
+      (session.endedAt && session.startedAt ? 
+        Math.floor((new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()) / 1000) : 0);
+    
+    const durationMinutes = Math.floor(durationSeconds / 60);
+    const durationDisplay = durationMinutes > 0 ? `${durationMinutes} min` : '--';
+    
+    return {
+      duration: durationDisplay,
+      sets: totalSets,
+      volume: totalVolume > 0 ? Math.round(totalVolume).toLocaleString() : '--',
+    };
+  }, [selectedWorkout, workoutHistory]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -500,19 +568,19 @@ export default function WorkoutPlanScreen() {
                     </View>
                   )}
 
-                  {selectedWorkout.status === 'completed' && (
+                  {selectedWorkout.status === 'completed' && completedSessionData && (
                     <View className="mt-4 pt-4 border-t border-border">
                       <View className="flex-row justify-between">
                         <View className="items-center flex-1">
-                          <Text className="text-lg font-bold text-success">--:--</Text>
+                          <Text className="text-lg font-bold text-success">{completedSessionData.duration}</Text>
                           <Text className="text-xs text-muted-foreground">Duration</Text>
                         </View>
                         <View className="items-center flex-1">
-                          <Text className="text-lg font-bold text-foreground">{dayExercises.reduce((sum, e) => sum + e.targetSets, 0)}</Text>
+                          <Text className="text-lg font-bold text-foreground">{completedSessionData.sets}</Text>
                           <Text className="text-xs text-muted-foreground">Sets</Text>
                         </View>
                         <View className="items-center flex-1">
-                          <Text className="text-lg font-bold text-foreground">--</Text>
+                          <Text className="text-lg font-bold text-foreground">{completedSessionData.volume}</Text>
                           <Text className="text-xs text-muted-foreground">Volume (lbs)</Text>
                         </View>
                       </View>

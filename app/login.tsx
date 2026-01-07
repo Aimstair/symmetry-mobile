@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { View, Text, Platform, Alert, ActivityIndicator, StyleSheet, Pressable } from 'react-native';
+import { useState, useEffect, useRef } from 'react';
+import { View, Text, Platform, Alert, ActivityIndicator, StyleSheet, Pressable, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -11,15 +11,15 @@ import { makeRedirectUri } from 'expo-auth-session';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Sparkles, Dumbbell } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { useAppStore } from '@/store/useAppStore';
 
 /**
- * Login Screen - Glassmorphism Welcome
+ * Login Screen - Guest-First Architecture
  * 
  * Features:
  * - Continue with Apple (native iOS flow)
  * - Continue with Google (OAuth browser flow)
- * - Stunning gradient background with glassmorphism card
- * - Apple HIG compliant buttons
+ * - Syncs local guest data to cloud on successful sign-in
  */
 
 // Required for web browser auth to complete properly
@@ -30,6 +30,10 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const [loadingProvider, setLoadingProvider] = useState<'google' | 'apple' | null>(null);
   const [appleAuthAvailable, setAppleAuthAvailable] = useState(false);
+  
+  // Get store actions for syncing guest data
+  const isGuest = useAppStore((s) => s.isGuest);
+  const syncGuestDataToCloud = useAppStore((s) => s.syncGuestDataToCloud);
 
   // Check if Apple Authentication is available (iOS only)
   useEffect(() => {
@@ -44,33 +48,52 @@ export default function Login() {
 
   /**
    * Google Sign-In using OAuth browser flow
+   * 
+   * For Expo Go: Opens browser and listens for the callback URL via Linking API.
+   * This approach works better than openAuthSessionAsync which can't handle
+   * cross-origin redirects properly in Expo Go.
    */
   const performGoogleSignIn = async () => {
     try {
       setIsLoading(true);
       setLoadingProvider('google');
 
-      // For Expo Go development, we need to use a different approach
-      // because Supabase redirects to site_url, not the custom scheme
+      // For Expo Go development
       const isExpoGo = !Constants.appOwnership || Constants.appOwnership === 'expo';
       
       // Get the Supabase URL from environment
       const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || 'http://192.168.68.113.nip.io:54321';
       
-      // In development/Expo Go, use an Edge Function to handle the OAuth callback
-      // This displays a nice page that can redirect back to the app
-      // In production builds, use the custom scheme directly
-      const redirectUri = isExpoGo 
-        ? `${supabaseUrl}/functions/v1/auth-callback`  // Edge function handles redirect
-        : makeRedirectUri({
-            scheme: 'symmetry',
-            path: 'auth/callback',
-          });
+      // Use Supabase's auth callback as redirectTo
+      const redirectUri = `${supabaseUrl}/auth/v1/callback`;
 
       if (__DEV__) {
-        console.log('🔗 Google OAuth Redirect URI:', redirectUri);
+        console.log('🔗 OAuth redirect URI:', redirectUri);
         console.log('📱 Running in Expo Go:', isExpoGo);
       }
+
+      // Set up promise to capture the OAuth callback
+      let linkingListener: any;
+      const authPromise = new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          if (linkingListener) linkingListener.remove();
+          reject(new Error('OAuth timed out after 2 minutes'));
+        }, 120000);
+
+        // Listen for any URL that contains auth tokens
+        linkingListener = Linking.addEventListener('url', (event) => {
+          if (__DEV__) {
+            console.log('🔗 Linking event received:', event.url.substring(0, 100));
+          }
+          
+          // Check if this URL has auth tokens (in hash or query)
+          if (event.url.includes('access_token')) {
+            clearTimeout(timeout);
+            if (linkingListener) linkingListener.remove();
+            resolve(event.url);
+          }
+        });
+      });
 
       // Start OAuth flow
       const { data, error } = await supabase.auth.signInWithOAuth({
@@ -84,65 +107,95 @@ export default function Login() {
       if (error) throw error;
 
       if (data?.url) {
-        // Open the OAuth URL in a web browser
-        const result = await WebBrowser.openAuthSessionAsync(
-          data.url,
-          redirectUri,
-          {
-            showInRecents: true,
+        if (__DEV__) {
+          console.log('🌐 Opening browser for OAuth...');
+        }
+
+        // Open browser - don't wait for result as it may error due to redirect loop
+        WebBrowser.openBrowserAsync(data.url);
+
+        // Wait for the Linking event with tokens
+        const callbackUrl = await authPromise;
+        
+        if (__DEV__) {
+          console.log('✅ Got callback URL via Linking');
+        }
+
+        // Close browser
+        await WebBrowser.dismissBrowser();
+
+        // Extract tokens from URL - prioritize hash fragment
+        let params: URLSearchParams | null = null;
+        
+        if (callbackUrl.includes('#')) {
+          const hashPart = callbackUrl.split('#')[1];
+          params = new URLSearchParams(hashPart);
+          if (__DEV__) {
+            console.log('🔍 Extracted tokens from hash fragment');
           }
-        );
+        }
+        
+        if (!params || !params.get('access_token')) {
+          if (callbackUrl.includes('?')) {
+            const queryPart = callbackUrl.split('?')[1].split('#')[0];
+            params = new URLSearchParams(queryPart);
+            if (__DEV__) {
+              console.log('🔍 Extracted tokens from query params');
+            }
+          }
+        }
+        
+        if (!params) {
+          throw new Error('Could not parse callback URL');
+        }
+        
+        const accessToken = params.get('access_token');
+        const refreshToken = params.get('refresh_token') || '';
 
         if (__DEV__) {
-          console.log('🌐 WebBrowser result:', result.type, 'url' in result ? result.url?.substring(0, 100) + '...' : 'no url');
+          console.log('🔑 Access token found:', !!accessToken);
+          console.log('🔑 Token starts with:', accessToken?.substring(0, 15) + '...');
         }
 
-        if (result.type === 'success' && result.url) {
-          // Extract tokens from the URL hash fragment
-          const url = result.url;
-          let params: URLSearchParams;
-          
-          if (url.includes('#')) {
-            // Tokens are in hash fragment (most common)
-            const hashPart = url.split('#')[1];
-            params = new URLSearchParams(hashPart);
-          } else if (url.includes('?')) {
-            // Tokens might be in query string
-            const queryPart = url.split('?')[1];
-            params = new URLSearchParams(queryPart);
-          } else {
-            throw new Error('No tokens found in redirect URL');
-          }
-          
-          const accessToken = params.get('access_token');
-          const refreshToken = params.get('refresh_token');
+        if (!accessToken) {
+          throw new Error('No access token in callback URL');
+        }
 
-          if (accessToken) {
-            if (__DEV__) {
-              console.log('🔑 Found access token, setting session...');
-            }
-            
-            // Set the session with the tokens
-            const { error: sessionError } = await supabase.auth.setSession({
-              access_token: accessToken,
-              refresh_token: refreshToken || '',
-            });
+        // Set the session with Supabase tokens
+        if (__DEV__) {
+          console.log('🔐 Setting session...');
+        }
 
-            if (sessionError) throw sessionError;
+        const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
 
-            if (__DEV__) {
-              console.log('✅ Google Sign-In successful');
-            }
-            
-            // Navigation handled by auth state change in _layout
-          } else {
-            throw new Error('No access token in redirect URL');
-          }
-        } else if (result.type === 'cancel') {
+        if (sessionError) {
+          console.error('❌ Session error:', sessionError);
+          throw sessionError;
+        }
+
+        if (__DEV__) {
+          console.log('✅ Session set successfully');
+        }
+
+        // Sync guest data to cloud if user was a guest
+        if (isGuest && sessionData?.user) {
           if (__DEV__) {
-            console.log('ℹ️ Google Sign-In cancelled by user');
+            console.log('🔄 Syncing guest data to cloud...');
+          }
+          await syncGuestDataToCloud({
+            id: sessionData.user.id,
+            email: sessionData.user.email || '',
+          });
+          if (__DEV__) {
+            console.log('✅ Guest data synced successfully');
           }
         }
+
+        // Navigate to main app
+        router.replace('/(tabs)');
       }
     } catch (error: any) {
       console.error('❌ Google Sign-In error:', error);
@@ -153,6 +206,8 @@ export default function Login() {
     } finally {
       setIsLoading(false);
       setLoadingProvider(null);
+      // Ensure browser is closed
+      WebBrowser.dismissBrowser();
     }
   };
 
@@ -201,7 +256,22 @@ export default function Login() {
         });
       }
 
-      // Navigation handled by auth state change in _layout
+      // Sync guest data to cloud if user was a guest
+      if (isGuest && data?.user) {
+        if (__DEV__) {
+          console.log('🔄 Syncing guest data to cloud...');
+        }
+        await syncGuestDataToCloud({
+          id: data.user.id,
+          email: data.user.email || '',
+        });
+        if (__DEV__) {
+          console.log('✅ Guest data synced successfully');
+        }
+      }
+
+      // Navigate to main app
+      router.replace('/(tabs)');
 
     } catch (error: any) {
       if (error.code === 'ERR_REQUEST_CANCELED') {

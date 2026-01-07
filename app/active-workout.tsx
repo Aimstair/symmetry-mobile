@@ -298,6 +298,7 @@ export default function ActiveWorkout() {
     syncSaveWorkoutSession,
     syncMarkTodayWorkoutCompleted,
     syncEnsureTodaySchedule,
+    syncFetchWorkoutHistory,
     updateActiveWorkoutSets,
   } = useAppStore();
 
@@ -526,6 +527,8 @@ export default function ActiveWorkout() {
   // Save workout session to database and clean up
   const finishAndSaveWorkout = async () => {
     try {
+      console.log('🏁 Starting workout save process...');
+      
       // Prepare session data from exercises
       const sessionExercises = exercises
         .filter(ex => ex.sets.some(s => s.completed)) // Only include exercises with completed sets
@@ -541,16 +544,27 @@ export default function ActiveWorkout() {
             })),
         }));
 
+      console.log('💾 Saving workout session with', sessionExercises.length, 'exercises...');
+      
       // Save to cloud and get session ID
       const sessionId = await syncSaveWorkoutSession({
         name: currentDay?.name || 'Workout Session',
         exercises: sessionExercises,
       });
 
+      console.log('✅ Workout saved with session ID:', sessionId);
+
       // Mark today's scheduled workout as completed (if exists)
       if (sessionId) {
+        console.log('📅 Marking today as completed...');
         await syncMarkTodayWorkoutCompleted(sessionId);
+        console.log('✅ Today marked as completed');
       }
+
+      // Refresh workout history to update UI with completed workout
+      console.log('🔄 Fetching updated workout history...');
+      await syncFetchWorkoutHistory();
+      console.log('✅ Workout history refreshed');
 
       // End workout in store
       endWorkout();

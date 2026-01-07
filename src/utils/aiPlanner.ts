@@ -417,19 +417,22 @@ export function generatePlanFromScan(
   // Analyze muscle scores to determine tiers
   const muscleAnalysis = analyzeMuscleScores(scanResults.muscleScores);
   
-  // Get only upcoming training days (from today to Saturday)
-  const upcomingDays = getUpcomingTrainingDays(startDate, allTrainingDays);
+  // Sort training days by day order (Monday first for consistent mapping)
+  const dayOrder = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const sortedTrainingDays = [...allTrainingDays].sort((a, b) => 
+    dayOrder.indexOf(a) - dayOrder.indexOf(b)
+  );
   
   if (__DEV__) {
     console.log('🤖 AI Planner:', {
       allTrainingDays,
-      upcomingDays,
+      sortedTrainingDays,
       muscleAnalysis: Object.fromEntries(muscleAnalysis),
     });
   }
   
-  // If no upcoming days this week, include all training days for next week
-  const effectiveTrainingDays = upcomingDays.length > 0 ? upcomingDays : allTrainingDays;
+  // Generate workouts for ALL training days (not just upcoming)
+  // This ensures the plan covers the full week
   const daysPerWeek = allTrainingDays.length;
   
   // Get split template based on total training frequency
@@ -440,8 +443,8 @@ export function generatePlanFromScan(
   const planId = generateId();
   const now = new Date();
   
-  // Generate workout days for each upcoming training day
-  const workoutDays: WorkoutDay[] = effectiveTrainingDays.map((dayName, index) => {
+  // Generate workout days for ALL training days
+  const workoutDays: WorkoutDay[] = sortedTrainingDays.map((trainingDayName, index) => {
     // Cycle through split template
     const splitDay = splitTemplate[index % splitTemplate.length];
     const workoutDayId = generateId();
@@ -458,7 +461,8 @@ export function generatePlanFromScan(
       id: workoutDayId,
       planId,
       orderIndex: index,
-      name: `${dayName} - ${splitDay.name}`,
+      dayName: trainingDayName, // IMPORTANT: Set dayName for calendar matching
+      name: splitDay.name, // Workout name (e.g., "Upper Body", "Lower Body")
       muscleGroups,
       exercises,
       createdAt: now,
@@ -470,9 +474,7 @@ export function generatePlanFromScan(
   const description = generatePlanDescription(muscleAnalysis, scanResults.date);
   
   // Build plan name with date context
-  const planName = upcomingDays.length > 0
-    ? `AI Plan - This Week (${startDate.toLocaleDateString()})`
-    : `AI Plan - Next Week`;
+  const planName = `AI Plan - ${startDate.toLocaleDateString()}`;
   
   return {
     id: planId,

@@ -56,12 +56,14 @@ export interface CalendarDay {
 
 /**
  * Get the start of the week (Monday) for a given date
+ * Uses local timezone to avoid date shifting
  */
 export function getWeekStart(date: Date): Date {
-  const d = new Date(date);
+  // Create date in local timezone
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Adjust when day is Sunday
-  d.setDate(diff);
+  const diff = day === 0 ? -6 : 1 - day; // Adjust: Sunday -> -6, Monday -> 0, Tuesday -> -1, etc.
+  d.setDate(d.getDate() + diff);
   d.setHours(0, 0, 0, 0);
   return d;
 }
@@ -92,6 +94,15 @@ export function getDayName(date: Date): string {
  * Check if two dates are the same day
  */
 export function isSameDay(date1: Date, date2: Date): boolean {
+  // Validate both dates are valid Date objects
+  if (!date1 || !date2 || !(date1 instanceof Date) || !(date2 instanceof Date)) {
+    return false;
+  }
+  // Check if dates are valid (not NaN)
+  if (isNaN(date1.getTime()) || isNaN(date2.getTime())) {
+    return false;
+  }
+  
   return (
     date1.getFullYear() === date2.getFullYear() &&
     date1.getMonth() === date2.getMonth() &&
@@ -103,6 +114,14 @@ export function isSameDay(date1: Date, date2: Date): boolean {
  * Check if a date is before today
  */
 export function isBeforeToday(date: Date, today: Date): boolean {
+  // Validate both dates
+  if (!date || !today || !(date instanceof Date) || !(today instanceof Date)) {
+    return false;
+  }
+  if (isNaN(date.getTime()) || isNaN(today.getTime())) {
+    return false;
+  }
+  
   const d1 = new Date(date);
   const d2 = new Date(today);
   d1.setHours(0, 0, 0, 0);
@@ -124,7 +143,11 @@ export function getDayStatus(
   isRestDay: boolean,
   completedDates?: Set<string>
 ): DayStatus {
-  const dateString = date.toISOString().split('T')[0];
+  // Use local timezone for date string to match completedDates format
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const dateString = `${year}-${month}-${day}`;
   
   // Rest days are always 'rest' regardless of past/present/future
   if (isRestDay) {
@@ -207,10 +230,30 @@ export function mapWorkoutPlanToWeek(
   return weekDates.map((date) => {
     const dayName = getFullDayName(date);
     const dayNameLower = dayName.toLowerCase();
-    const dateString = date.toISOString().split('T')[0];
+    // Use local timezone for date string to avoid UTC shifting
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const dateString = `${year}-${month}-${day}`;
     const isTrainingDay = trainingDaySet.has(dayNameLower);
     const wasCompleted = completedDates?.has(dateString) || false;
     const sessionInfo = completedSessions?.get(dateString);
+    
+    // Debug log for today (using local timezone for comparison)
+    const todayYear = today.getFullYear();
+    const todayMonth = String(today.getMonth() + 1).padStart(2, '0');
+    const todayDay = String(today.getDate()).padStart(2, '0');
+    const todayString = `${todayYear}-${todayMonth}-${todayDay}`;
+    if (dateString === todayString && __DEV__) {
+      console.log('📅 Today in calendar:', {
+        date: dateString,
+        dayName,
+        isTrainingDay,
+        wasCompleted,
+        hasCompletedDates: !!completedDates,
+        completedDatesCount: completedDates?.size || 0,
+      });
+    }
     
     // For past weeks, we don't show the plan template
     // Only show actual completed sessions
@@ -324,7 +367,24 @@ export function mapWorkoutPlanToWeek(
 const FULL_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 export function getFullDayName(date: Date): string {
-  return FULL_DAY_NAMES[date.getDay()];
+  const dayIndex = date.getDay();
+  const dayName = FULL_DAY_NAMES[dayIndex];
+  
+  if (__DEV__) {
+    // Use local timezone for date string
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const localDateStr = `${year}-${month}-${day}`;
+    console.log('🗓️ getFullDayName:', {
+      date: localDateStr,
+      dayIndex,
+      dayName,
+      actualDate: date.getDate(),
+    });
+  }
+  
+  return dayName;
 }
 
 /**

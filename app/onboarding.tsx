@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -21,13 +21,10 @@ import {
 import { cn } from '@/lib/utils';
 import { convert } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
-import { supabase } from '@/lib/supabase';
-import { dataService, isUsingCloudService } from '@/services/dataServiceProvider';
 import { calculateNutritionTargets } from '@/utils/nutrition';
-import { NutritionTargets } from '@/types';
 
 /**
- * Onboarding Page - React Native Implementation
+ * Onboarding Page - Guest-First Architecture
  * 
  * Migration Notes:
  * - Removed framer-motion (AnimatePresence, motion.div)
@@ -73,30 +70,9 @@ export default function Onboarding() {
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
-  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
-
-  // Get the current Supabase session on mount
-  useEffect(() => {
-    async function getSession() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        setSessionUserId(session.user.id);
-        setSessionEmail(session.user.email || null);
-        
-        if (__DEV__) {
-          console.log('👤 Onboarding for user:', session.user.email, session.user.id);
-        }
-      } else {
-        // No session - redirect back to login
-        if (__DEV__) {
-          console.log('⚠️ No session in onboarding, redirecting to login');
-        }
-        router.replace('/login');
-      }
-    }
-    getSession();
-  }, []);
+  
+  // Generate a local guest ID for this user (will be replaced with Supabase ID on sign-in)
+  const [guestId] = useState(() => `guest-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
 
   const [formData, setFormData] = useState({
     height: '',
@@ -134,13 +110,7 @@ export default function Onboarding() {
     if (step < 5) {
       setStep(step + 1);
     } else {
-      // Complete onboarding - save user with Supabase session ID
-      if (!sessionUserId) {
-        Alert.alert('Error', 'No authenticated session found. Please sign in again.');
-        router.replace('/login');
-        return;
-      }
-
+      // Complete onboarding - save user locally as guest
       setIsSubmitting(true);
 
       try {
@@ -156,11 +126,11 @@ export default function Onboarding() {
           weightInKg = convert.toKg(Number(formData.weight));
         }
 
-        // Create the user object with the Supabase user ID (always in metric)
+        // Create the user object with a local guest ID (will be replaced on sign-in)
         const newUser = {
-          id: sessionUserId,
-          name: sessionEmail?.split('@')[0] || 'Athlete', // Use email prefix as default name
-          email: sessionEmail || '',
+          id: guestId,
+          name: 'Athlete', // Default name for guests
+          email: '', // No email for guests
           height: heightInCm,
           weight: weightInKg,
           age: Number(formData.age),
@@ -186,35 +156,21 @@ export default function Onboarding() {
 
         if (__DEV__) {
           console.log('🍎 Calculated Nutrition:', nutritionTargets);
+          console.log('👤 Guest user created:', guestId);
         }
 
-        // Save to cloud if using cloud service
-        if (isUsingCloudService()) {
-          try {
-            await dataService.user.createUser(newUser);
-            if (__DEV__) {
-              console.log('✅ User profile saved to Supabase:', newUser.id);
-            }
-          } catch (error: any) {
-            // If user already exists, try updating instead
-            if (error.message?.includes('duplicate') || error.message?.includes('already exists')) {
-              await dataService.user.updateUser(newUser.id, newUser);
-              if (__DEV__) {
-                console.log('✅ User profile updated in Supabase:', newUser.id);
-              }
-            } else {
-              throw error;
-            }
-          }
-        }
-
-        // Update local store
+        // Save locally only (no cloud sync for guests)
+        // Cloud sync will happen when user signs in via Settings
         setUser(newUser);
+        
+        // Update nutrition targets locally
+        // Note: syncUpdateNutritionTargets will try cloud sync but fail gracefully for guests
         await syncUpdateNutritionTargets(nutritionTargets);
+        
         completeOnboarding();
 
         if (__DEV__) {
-          console.log('🎉 Onboarding completed for user:', newUser.id);
+          console.log('🎉 Onboarding completed for guest:', guestId);
         }
 
         router.replace('/(tabs)');
