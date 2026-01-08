@@ -15,6 +15,7 @@ import {
   PlanExercise,
   User,
 } from '@/types';
+import { getExerciseFromCache } from '@/hooks/useExercises';
 
 // ============================================================================
 // TYPES
@@ -273,6 +274,9 @@ function createPlanExercise(
 ): PlanExercise {
   const settings = TIER_SETTINGS[tier];
   
+  // Hydrate exercise data from cache
+  const exercise = getExerciseFromCache(exerciseId);
+  
   return {
     id: generateId(),
     workoutDayId,
@@ -282,6 +286,7 @@ function createPlanExercise(
     targetReps: settings.reps,
     restSeconds: settings.restSeconds,
     notes: settings.notes || undefined,
+    exercise: exercise || undefined, // Populate exercise field for UI
   };
 }
 

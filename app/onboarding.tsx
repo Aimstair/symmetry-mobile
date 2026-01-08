@@ -2,7 +2,7 @@ import * as React from 'react';
 import { useState } from 'react';
 import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { router, Link } from 'expo-router'; // Combined import
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -25,16 +25,6 @@ import { calculateNutritionTargets } from '@/utils/nutrition';
 
 /**
  * Onboarding Page - Guest-First Architecture
- * 
- * Migration Notes:
- * - Removed framer-motion (AnimatePresence, motion.div)
- * - Replaced div with View, p/h1 with Text
- * - Replaced useNavigate with router from expo-router
- * - Icons from lucide-react-native with size/color props
- * - Grid layouts converted to Flexbox
- * - Added KeyboardAvoidingView for form inputs
- * - SafeAreaView for notch/dynamic island
- * - Removed hover states, using Pressable active states
  */
 
 const steps = [
@@ -66,7 +56,7 @@ const equipmentTypes = [
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
 export default function Onboarding() {
-  const { updateOnboarding, completeOnboarding, setUser, syncUpdateNutritionTargets, settings, updateSettings } = useAppStore();
+  const { updateOnboarding, completeOnboarding, setUser, syncAddMeasurementLog, syncUpdateNutritionTargets, settings, updateSettings } = useAppStore();
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -162,6 +152,15 @@ export default function Onboarding() {
         // Save locally only (no cloud sync for guests)
         // Cloud sync will happen when user signs in via Settings
         setUser(newUser);
+
+        await syncAddMeasurementLog({
+          id: `log-init-${Date.now()}`,
+          userId: guestId,
+          date: new Date(),
+          createdAt: new Date(),
+          weightKg: weightInKg, // Strict Metric
+          // No need to pass empty 'measurements' object anymore
+        });
         
         // Update nutrition targets locally
         // Note: syncUpdateNutritionTargets will try cloud sync but fail gracefully for guests
@@ -616,54 +615,70 @@ export default function Onboarding() {
             )}
           </View>
 
-          {/* Bottom padding for fixed navigation */}
-          <View className="h-24" />
+          {/* Bottom padding for fixed navigation - slightly taller for step 1 to allow for login link */}
+          <View className={cn("h-24", step === 1 && "h-32")} />
         </ScrollView>
 
         {/* Fixed Bottom Navigation */}
         <View className="absolute bottom-0 left-0 right-0 bg-background border-t border-border">
           <SafeAreaView edges={['bottom']}>
-            <View className="flex-row gap-3 p-4">
-              {step > 1 && (
-                <View className="flex-1">
+            <View className="px-4 pt-4 pb-2">
+              {/* Button Row */}
+              <View className="flex-row gap-3">
+                {step > 1 && (
+                  <View className="flex-1">
+                    <Button
+                      variant="outline"
+                      onPress={() => setStep(step - 1)}
+                      className="w-full"
+                      disabled={isSubmitting}
+                      leftIcon={<ChevronLeft size={16} color="#FAFAFA" />}
+                    >
+                      <Text className="text-foreground font-semibold">Back</Text>
+                    </Button>
+                  </View>
+                )}
+                <View className={cn('flex-1', step === 1 && 'w-full')}>
                   <Button
-                    variant="outline"
-                    onPress={() => setStep(step - 1)}
-                    className="w-full"
-                    disabled={isSubmitting}
-                    leftIcon={<ChevronLeft size={16} color="#FAFAFA" />}
+                    onPress={handleNext}
+                    disabled={!canProceed() || isSubmitting}
+                    className={cn(
+                      'w-full',
+                      canProceed() && !isSubmitting ? 'bg-primary opacity-100' : 'bg-muted opacity-50'
+                    )}
+                    leftIcon={step === 5 ? (
+                      isSubmitting ? (
+                        <ActivityIndicator size="small" color="#0A0A0F" />
+                      ) : (
+                        <Sparkles size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} />
+                      )
+                    ) : undefined}
+                    rightIcon={step !== 5 ? <ChevronRight size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
                   >
-                    <Text className="text-foreground font-semibold">Back</Text>
+                    <Text className={cn(
+                      'font-semibold',
+                      canProceed() && !isSubmitting ? 'text-primary-foreground' : 'text-muted-foreground'
+                    )}>
+                      {step === 5 
+                        ? (isSubmitting ? 'Setting up...' : 'Start Training') 
+                        : 'Continue'}
+                    </Text>
                   </Button>
                 </View>
-              )}
-              <View className={cn('flex-1', step === 1 && 'w-full')}>
-                <Button
-                  onPress={handleNext}
-                  disabled={!canProceed() || isSubmitting}
-                  className={cn(
-                    'w-full',
-                    canProceed() && !isSubmitting ? 'bg-primary opacity-100' : 'bg-muted opacity-50'
-                  )}
-                  leftIcon={step === 5 ? (
-                    isSubmitting ? (
-                      <ActivityIndicator size="small" color="#0A0A0F" />
-                    ) : (
-                      <Sparkles size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} />
-                    )
-                  ) : undefined}
-                  rightIcon={step !== 5 ? <ChevronRight size={16} color={canProceed() ? '#0A0A0F' : '#71717A'} /> : undefined}
-                >
-                  <Text className={cn(
-                    'font-semibold',
-                    canProceed() && !isSubmitting ? 'text-primary-foreground' : 'text-muted-foreground'
-                  )}>
-                    {step === 5 
-                      ? (isSubmitting ? 'Setting up...' : 'Start Training') 
-                      : 'Continue'}
-                  </Text>
-                </Button>
               </View>
+
+              {/* Login Link - Only shown on Step 1 */}
+              {step === 1 && (
+                <View className="items-center mt-4 mb-2">
+                  <Link href="/login" asChild>
+                    <Pressable hitSlop={20}>
+                      <Text className="text-muted-foreground text-sm">
+                        Already have an account? <Text className="text-primary font-semibold">Log in</Text>
+                      </Text>
+                    </Pressable>
+                  </Link>
+                </View>
+              )}
             </View>
           </SafeAreaView>
         </View>

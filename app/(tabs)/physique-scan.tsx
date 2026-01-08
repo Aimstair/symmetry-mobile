@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
 import { generatePlanFromScan } from '@/utils/aiPlanner';
+import { initializeExerciseLookup } from '@/hooks/useExercises';
 import Svg, { Ellipse, Line, Path, Rect, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { 
   Camera, 
@@ -106,11 +107,16 @@ export default function PhysiqueScan() {
       mainCardAnim.setValue(0);
       historyAnim.setValue(0);
       if (phase === 'idle' || phase === 'results') {
-        Animated.stagger(100, [
+        const animation =Animated.stagger(100, [
           Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
           Animated.timing(mainCardAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
           Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-        ]).start();
+        ]);
+        animation.start();
+
+        return () => {
+        animation.stop();
+        }
       }
     }, [phase, headerAnim, mainCardAnim, historyAnim, loadProgressData])
   );
@@ -183,6 +189,9 @@ export default function PhysiqueScan() {
             // Generate AI workout plan from scan results
             if (user) {
               try {
+                // Initialize exercise cache before generating plan
+                await initializeExerciseLookup();
+                
                 const aiPlan = generatePlanFromScan(savedScan, new Date(), {
                   user,
                 });

@@ -9,7 +9,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- USERS TABLE
 -- ============================================================================
 CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   age INTEGER NOT NULL CHECK (age > 0 AND age < 150),
@@ -26,7 +26,7 @@ CREATE TABLE users (
 -- NUTRITION TARGETS TABLE
 -- ============================================================================
 CREATE TABLE nutrition_targets (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   calories NUMERIC NOT NULL CHECK (calories >= 0),
   protein NUMERIC NOT NULL CHECK (protein >= 0),
@@ -42,7 +42,7 @@ CREATE TABLE nutrition_targets (
 -- EQUIPMENT PROFILES TABLE
 -- ============================================================================
 CREATE TABLE equipment_profiles (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   has_barbell BOOLEAN NOT NULL DEFAULT false,
   has_dumbbells BOOLEAN NOT NULL DEFAULT false,
@@ -59,7 +59,7 @@ CREATE TABLE equipment_profiles (
 -- WORKOUT PLANS TABLE
 -- ============================================================================
 CREATE TABLE workout_plans (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   description TEXT,
@@ -77,7 +77,7 @@ CREATE INDEX idx_workout_plans_user_id ON workout_plans(user_id);
 -- BODY MEASUREMENTS TABLE
 -- ============================================================================
 CREATE TABLE body_measurements (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   weight NUMERIC NOT NULL CHECK (weight > 0),
@@ -94,7 +94,7 @@ CREATE INDEX idx_body_measurements_date ON body_measurements(date DESC);
 -- PHYSIQUE SCANS TABLE
 -- ============================================================================
 CREATE TABLE physique_scans (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   images JSONB NOT NULL DEFAULT '{}',
@@ -112,7 +112,7 @@ CREATE INDEX idx_physique_scans_date ON physique_scans(date DESC);
 -- CARDIO LOGS TABLE
 -- ============================================================================
 CREATE TABLE cardio_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   type TEXT NOT NULL CHECK (type IN ('running', 'cycling', 'swimming', 'walking', 'other')),

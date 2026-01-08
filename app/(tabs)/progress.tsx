@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, ScrollView, Dimensions, Animated, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Dimensions, Animated, ActivityIndicator, Alert, Keyboard } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -28,10 +28,14 @@ import {
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
 import { dataService } from '@/services/dataServiceProvider';
-import type { BodyMeasurement, PhysiqueScan, CardioLog, CatalogExercise } from '@/types';
+import type { BodyMeasurement, PhysiqueScan, CardioLog, CatalogExercise, MeasurementLog } from '@/types';
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64; // Account for padding
+const KG_TO_LBS = 2.20462;
+const CM_TO_IN = 0.393701;
+const IN_TO_CM = 2.54;
+const LBS_TO_KG = 0.453592;
 
 // Helper functions to transform store data for display
 function formatDate(date: Date | string): string {
@@ -145,11 +149,11 @@ export default function Progress() {
 
   // Get user and data from store
   const user = useAppStore((s) => s.user);
-  const bodyMeasurements = useAppStore((s) => s.bodyMeasurements);
+  const measurementLogs = useAppStore((s) => s.measurementLogs);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const cardioLogs = useAppStore((s) => s.cardioLogs);
   const settings = useAppStore((s) => s.settings);
-  const syncAddBodyMeasurement = useAppStore((s) => s.syncAddBodyMeasurement);
+  const syncAddMeasurementLog = useAppStore((s) => s.syncAddMeasurementLog);
   const syncAddCardioLog = useAppStore((s) => s.syncAddCardioLog);
   const isLoading = useAppStore((s) => s.isLoading);
 
@@ -189,58 +193,147 @@ export default function Progress() {
       
       headerAnim.setValue(0);
       contentAnim.setValue(0);
-      Animated.stagger(100, [
+      const animation = Animated.stagger(100, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(contentAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-      ]).start();
+      ]);
+
+      animation.start();
+
+      return () => {
+        animation.stop();
+      };
     }, [headerAnim, contentAnim, loadProgressData])
   );
 
   // Compute derived data using useMemo
-  const weightChartData = useMemo(() => transformToWeightData(bodyMeasurements), [bodyMeasurements]);
+  const weightChartData = useMemo(() => {
+    if (!measurementLogs.length) return [];
+    
+    return measurementLogs
+      .filter(m => m.weightKg !== undefined && m.weightKg !== null)
+      .slice()
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .slice(-9)
+      .map((m) => {
+        // Convert Metric (DB) -> User Unit (UI)
+        const val = settings.unit === 'lbs' ? (m.weightKg! * KG_TO_LBS) : m.weightKg!;
+        return {
+          value: parseFloat(val.toFixed(1)),
+          label: formatDate(m.date).split(' ')[1],
+          date: formatDate(m.date),
+        };
+      });
+  }, [measurementLogs, settings.unit]);
+
   const symmetryChartData = useMemo(() => transformToSymmetryData(physiqueScans), [physiqueScans]);
-  const measurementsComparison = useMemo(() => getMeasurementsComparison(bodyMeasurements), [bodyMeasurements]);
+
+  const measurementsComparison = useMemo(() => {
+    const logsWithTape = measurementLogs
+      .filter(m => m.chestCm || m.waistCm || m.leftArmCm || m.rightArmCm || m.leftThighCm || m.rightThighCm)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    if (logsWithTape.length < 1) return [];
+
+    const current = logsWithTape[0];
+    const previous = logsWithTape[1] || current;
+
+    // Helper: Convert CM to User Unit
+    const toUserUnit = (cm?: number) => {
+      if (!cm) return 0;
+      const val = settings.measurementUnit === 'in' ? cm * CM_TO_IN : cm;
+      return parseFloat(val.toFixed(1));
+    };
+
+    const types = [
+      { name: 'Chest', current: toUserUnit(current.chestCm), prev: toUserUnit(previous.chestCm), inverse: false },
+      { name: 'Waist', current: toUserUnit(current.waistCm), prev: toUserUnit(previous.waistCm), inverse: true },
+      { name: 'Arms', current: toUserUnit(current.leftArmCm || current.rightArmCm), prev: toUserUnit(previous.leftArmCm || previous.rightArmCm), inverse: false },
+      { name: 'Thighs', current: toUserUnit(current.leftThighCm || current.rightThighCm), prev: toUserUnit(previous.leftThighCm || previous.rightThighCm), inverse: false },
+    ];
+
+    return types
+      .filter(t => t.current > 0)
+      .map(t => ({
+        name: t.name,
+        current: t.current,
+        previous: t.prev || t.current,
+        unit: settings.measurementUnit,
+        inverse: t.inverse
+      }));
+  }, [measurementLogs, settings.measurementUnit]);
+
   const cardioLogsList = useMemo(() => transformCardioLogs(cardioLogs), [cardioLogs]);
 
   // Calculate weight change
   const weightChange = useMemo(() => {
-    if (bodyMeasurements.length < 2) return 0;
-    const sorted = bodyMeasurements
-      .slice()
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return sorted[0].weight - sorted[sorted.length - 1].weight;
-  }, [bodyMeasurements]);
+     if (weightChartData.length < 2) return 0;
+     return weightChartData[weightChartData.length -1].value - weightChartData[0].value;
+  }, [weightChartData]);
 
   // Get last weight entry
-  const lastWeight = useMemo(() => {
-    if (!bodyMeasurements.length) return null;
-    const sorted = bodyMeasurements
-      .slice()
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return { weight: sorted[0].weight, date: formatDate(sorted[0].date) };
-  }, [bodyMeasurements]);
+  const lastWeight = weightChartData.length > 0 ? weightChartData[weightChartData.length - 1] : null;
 
   // Handle logging weight
-  const handleLogWeight = async () => {
-    if (!weightInput || !user) return;
-    
-    const weight = parseFloat(weightInput);
-    if (isNaN(weight)) return;
+  const onSaveWeight = async (weightValue: number) => {
+    if (!user) return;
+    if (isNaN(weightValue) || weightValue <= 0) { Alert.alert('Invalid', 'Enter a valid number.'); return; }
 
-    const newMeasurement: BodyMeasurement = {
-      id: `bm-${Date.now()}`,
+    // Convert Input to KG
+    const weightKg = settings.unit === 'lbs' ? weightValue * LBS_TO_KG : weightValue;
+
+    const newLog: MeasurementLog = {
+      id: `log-${Date.now()}`,
       userId: user.id,
       date: new Date(),
-      weight,
-      measurements: {},
+      createdAt: new Date(),
+      weightKg: parseFloat(weightKg.toFixed(2)),
     };
 
     try {
-      await syncAddBodyMeasurement(newMeasurement);
+      await syncAddMeasurementLog(newLog);
       setWeightInput('');
+      Keyboard.dismiss();
     } catch (error) {
-      console.error('Failed to log weight:', error);
+      console.error(error);
     }
+  };
+
+  const onSaveMeasurements = async (data: { chest: number; waist: number; arms: number; thighs: number }) => {
+    if (!user) return;
+
+    // Helper: Convert Input to CM
+    const toCm = (val: number) => settings.measurementUnit === 'in' ? val * IN_TO_CM : val;
+    
+    // Get last weight to avoid gaps (optional)
+    const lastWeightKg = measurementLogs
+       .sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+       .find(m => m.weightKg)?.weightKg;
+
+    const newLog: MeasurementLog = {
+      id: `log-tape-${Date.now()}`,
+      userId: user.id,
+      date: new Date(),
+      createdAt: new Date(),
+      weightKg: lastWeightKg, // Carry over weight
+      chestCm: toCm(data.chest),
+      waistCm: toCm(data.waist),
+      leftArmCm: toCm(data.arms),
+      rightArmCm: toCm(data.arms), // Assume symmetry for simple input
+      leftThighCm: toCm(data.thighs),
+      rightThighCm: toCm(data.thighs),
+    };
+
+    try {
+      await syncAddMeasurementLog(newLog);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const handleInlineLog = () => {
+    const w = parseFloat(weightInput);
+    onSaveWeight(w);
   };
 
   // Exercise stats type for the Exercises tab
@@ -673,30 +766,15 @@ export default function Progress() {
                     <Text className="text-foreground ml-1">Log</Text>
                   </Button>
                 </View>
-                <GlassCard>
-                  <View className="flex-row gap-3">
-                    <Input 
-                      placeholder={lastWeight?.weight.toString() || "180.0"} 
-                      value={weightInput}
-                      onChangeText={setWeightInput}
-                      className="flex-1 text-center text-lg font-bold"
-                      keyboardType="decimal-pad"
-                    />
-                    <Button 
-                      className="bg-primary px-6"
-                      onPress={handleLogWeight}
-                      disabled={isLoading || !weightInput}
-                    >
-                      <Text className="text-primary-foreground font-semibold">Log</Text>
-                    </Button>
-                  </View>
-                  <Text className="text-xs text-muted-foreground mt-2 text-center">
-                    {lastWeight 
-                      ? `Last entry: ${lastWeight.weight} ${settings.unit} on ${lastWeight.date}`
-                      : 'No entries yet'
-                    }
-                  </Text>
-                </GlassCard>
+                <GlassCard className="mt-4">
+                    
+                    <Text className="text-xs text-muted-foreground mt-2 text-center">
+                      {lastWeight 
+                        ? `Last entry: ${lastWeight.value} ${settings.unit} on ${lastWeight.date}`
+                        : 'No entries yet'
+                      }
+                    </Text>
+                  </GlassCard>
               </View>
             </TabsContent>
 
@@ -787,10 +865,14 @@ export default function Progress() {
       <LogWeightModal 
         open={showLogWeightModal} 
         onOpenChange={setShowLogWeightModal} 
+        onSave={onSaveWeight} // Pass the save handler!
+        currentUnit={settings.unit}
       />
       <TapeMeasurementModal 
         open={showTapeMeasurementModal} 
         onOpenChange={setShowTapeMeasurementModal} 
+        onSave={onSaveMeasurements}
+        unit={settings.measurementUnit} // 'in' or 'cm'
       />
       <CardioLogModal 
         open={showCardioLogModal} 

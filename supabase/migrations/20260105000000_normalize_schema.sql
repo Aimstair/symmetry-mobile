@@ -29,7 +29,7 @@ CREATE TRIGGER update_exercises_updated_at BEFORE UPDATE ON exercises
 
 -- Exercise Alternatives (normalized from embedded array)
 CREATE TABLE exercise_alternatives (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   exercise_id TEXT NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
   alternative_id TEXT NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
   reason TEXT NOT NULL,
@@ -42,7 +42,7 @@ CREATE INDEX idx_exercise_alternatives_exercise_id ON exercise_alternatives(exer
 -- WORKOUT DAYS (Normalized from JSONB)
 -- ============================================================================
 CREATE TABLE workout_days (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   plan_id UUID NOT NULL REFERENCES workout_plans(id) ON DELETE CASCADE,
   order_index INTEGER NOT NULL CHECK (order_index >= 0),
   name TEXT NOT NULL,
@@ -61,7 +61,7 @@ CREATE TRIGGER update_workout_days_updated_at BEFORE UPDATE ON workout_days
 -- PLAN EXERCISES (Prescription for each day)
 -- ============================================================================
 CREATE TABLE plan_exercises (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workout_day_id UUID NOT NULL REFERENCES workout_days(id) ON DELETE CASCADE,
   exercise_id TEXT NOT NULL REFERENCES exercises(id) ON DELETE RESTRICT,
   order_index INTEGER NOT NULL CHECK (order_index >= 0),
@@ -84,7 +84,7 @@ CREATE TRIGGER update_plan_exercises_updated_at BEFORE UPDATE ON plan_exercises
 -- WORKOUT SESSIONS (Completed Workout History)
 -- ============================================================================
 CREATE TABLE workout_sessions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   plan_id UUID REFERENCES workout_plans(id) ON DELETE SET NULL, -- Optional link to source plan
   workout_day_id UUID REFERENCES workout_days(id) ON DELETE SET NULL, -- Optional link to source day
@@ -105,7 +105,7 @@ CREATE INDEX idx_workout_sessions_started_at ON workout_sessions(started_at DESC
 -- SESSION EXERCISES (Exercises performed in a session)
 -- ============================================================================
 CREATE TABLE session_exercises (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID NOT NULL REFERENCES workout_sessions(id) ON DELETE CASCADE,
   exercise_id TEXT NOT NULL REFERENCES exercises(id) ON DELETE RESTRICT,
   order_index INTEGER NOT NULL CHECK (order_index >= 0),
@@ -120,7 +120,7 @@ CREATE INDEX idx_session_exercises_exercise_id ON session_exercises(exercise_id)
 -- SESSION SETS (Individual sets performed)
 -- ============================================================================
 CREATE TABLE session_sets (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_exercise_id UUID NOT NULL REFERENCES session_exercises(id) ON DELETE CASCADE,
   set_number INTEGER NOT NULL CHECK (set_number > 0),
   weight NUMERIC NOT NULL CHECK (weight >= 0), -- Always stored in kg
@@ -139,7 +139,7 @@ CREATE INDEX idx_session_sets_session_exercise_id ON session_sets(session_exerci
 -- MEASUREMENT LOGS (Atomic Body Measurements - Replaces JSONB)
 -- ============================================================================
 CREATE TABLE measurement_logs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   -- All measurements stored in metric (cm/kg)

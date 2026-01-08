@@ -161,7 +161,7 @@ class LocalProgressService implements IProgressService {
     setStorageDataArray(this.MEASUREMENT_LOGS_KEY, filtered);
   }
 
-  async getBodyMeasurements(userId: string): Promise<BodyMeasurement[]> {
+  async getmeasurementLogs(userId: string): Promise<BodyMeasurement[]> {
     const data = getStorageData<BodyMeasurement>(this.BODY_KEY);
     return data.filter((m) => m.userId === userId);
   }

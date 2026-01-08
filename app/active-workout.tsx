@@ -48,14 +48,15 @@ const springConfig = {
 };
 
 // Isolated timer component to prevent full-screen re-renders
-const ElapsedTimer = ({ startTime }: { startTime: Date | null }) => {
+const ElapsedTimer = ({ startTime }: { startTime: Date | string | null }) => {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
     if (!startTime) return;
 
     const interval = setInterval(() => {
-      const start = startTime.getTime();
+      // JSON storage converts Date to String, so we must parse it new Date()
+      const start = new Date(startTime).getTime(); 
       const now = Date.now();
       setElapsed(Math.floor((now - start) / 1000));
     }, 1000);
@@ -234,7 +235,8 @@ interface SetData {
 
 // Extended exercise data for workout session
 interface ExerciseData {
-  id: string;
+  id: string; // Unique Plan/Session ID
+  catalogExerciseId: string; // Actual DB Exercise ID (e.g. 'bench_press')
   name: string;
   muscleGroup: string;
   equipment: string;
@@ -249,16 +251,12 @@ interface ExerciseData {
 // Convert plan exercises to workout session format
 function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
   return exercises.map((ex) => {
-    // Get exercise name from hydrated exercise or use exerciseId as fallback
-    const exerciseName = ex.exercise?.name || ex.exerciseId;
-    const muscleGroup = ex.exercise?.muscleGroups[0] || 'General';
-    const equipment = ex.exercise?.equipment[0] || 'Unknown';
-
     return {
-      id: ex.exerciseId, // Use catalog exercise ID (e.g., 'bench_press'), not plan_exercise UUID
-      name: exerciseName,
-      muscleGroup: muscleGroup,
-      equipment: equipment,
+      id: ex.id, 
+      catalogExerciseId: ex.exerciseId, // Store the reference for the DB
+      name: ex.exercise?.name || ex.exerciseId,
+      muscleGroup: ex.exercise?.muscleGroups[0] || 'General',
+      equipment: ex.exercise?.equipment[0] || 'Unknown',
       targetSets: ex.targetSets,
       targetReps: ex.targetReps,
       restSeconds: ex.restSeconds,
@@ -270,7 +268,6 @@ function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
         completed: false,
         isWarmup: false,
         tags: [],
-        // In a real app, these would come from workout history
         prevWeight: undefined,
         prevReps: undefined,
       })),
@@ -299,7 +296,7 @@ export default function ActiveWorkout() {
     syncMarkTodayWorkoutCompleted,
     syncEnsureTodaySchedule,
     syncFetchWorkoutHistory,
-    updateActiveWorkoutSets,
+    updateActiveWorkout,
   } = useAppStore();
 
   // Local state
@@ -317,6 +314,25 @@ export default function ActiveWorkout() {
   
   // Animation refs for smooth entrance
   const exerciseAnimations = useRef<Map<string, Animated.Value>>(new Map());
+
+  // ✅ PERSISTENCE HELPER: Syncs current UI state to Global Store
+  const persistProgress = useCallback((currentExercises: ExerciseData[]) => {
+    const exerciseSets: Record<string, any[]> = {};
+    currentExercises.forEach((ex) => {
+      exerciseSets[ex.id] = ex.sets.map((s) => ({
+        id: `temp-${s.id}`,
+        sessionExerciseId: ex.id,
+        setNumber: s.id,
+        weight: parseFloat(s.weight) || 0,
+        reps: parseInt(s.reps) || 0,
+        isWarmup: s.isWarmup,
+        isCompleted: s.completed,
+        createdAt: new Date(),
+      }));
+    });
+    // ✅ Saves immediately to MMKV via Zustand
+    updateActiveWorkout({ exerciseSets });
+  }, [updateActiveWorkout]);
 
   // Resolve current workout plan and day
   const { currentPlan, currentDay, loadError } = useMemo(() => {
@@ -368,7 +384,7 @@ export default function ActiveWorkout() {
     }
 
     return { currentPlan: plan, currentDay: workoutDay, loadError: null };
-  }, [activeWorkout, workoutPlans]);
+  }, [activeWorkout.isActive, activeWorkout.workoutId, workoutPlans]);
 
   // Redirect if no active workout
   useFocusEffect(
@@ -381,57 +397,21 @@ export default function ActiveWorkout() {
   );
 
   // Persist workout progress when leaving screen
-  useFocusEffect(
-    useCallback(() => {
-      // Return cleanup function that runs when screen loses focus
-      return () => {
-        if (exercises.length > 0) {
-          // Convert exercises to storable format (SessionSet compatible)
-          const exerciseSets: Record<string, any[]> = {};
-          exercises.forEach((ex) => {
-            exerciseSets[ex.id] = ex.sets.map((s) => ({
-              id: `temp-${s.id}`,
-              sessionExerciseId: ex.id,
-              setNumber: s.id,
-              weight: parseFloat(s.weight) || 0,
-              reps: parseInt(s.reps) || 0,
-              isWarmup: s.isWarmup,
-              isCompleted: s.completed,
-              createdAt: new Date(),
-            }));
-          });
-          updateActiveWorkoutSets(exerciseSets);
-          if (__DEV__) {
-            console.log('💾 Workout progress saved on screen blur');
-          }
-        }
-      };
-    }, [exercises, updateActiveWorkoutSets])
-  );
-
-  // Initialize exercises from current day (restore progress if available)
   useEffect(() => {
-    // Only initialize if exercises are not already set (first load or workout reset)
-    if (exercises.length > 0) {
-      if (__DEV__) {
-        console.log('⏭️ Exercises already loaded, skipping initialization');
-      }
-      return;
-    }
+    if (exercises.length > 0) return; // Already loaded
     
     if (currentDay?.exercises && currentDay.exercises.length > 0) {
       const sessionExercises = convertToSessionExercises(currentDay.exercises);
       
-      // Restore saved progress from store if available
+      // ✅ Restore from store if data exists
       if (activeWorkout.exerciseSets && Object.keys(activeWorkout.exerciseSets).length > 0) {
         sessionExercises.forEach((ex) => {
-          const savedSets = activeWorkout.exerciseSets[ex.id];
+          const savedSets = activeWorkout.exerciseSets?.[ex.id];
           if (savedSets && savedSets.length > 0) {
-            // Restore saved set data (convert from SessionSet to SetData)
-            ex.sets = savedSets.map((saved, idx) => ({
+            ex.sets = savedSets.map((saved: any, idx: number) => ({
               id: idx + 1,
-              weight: String(saved.weight || ''),
-              reps: String(saved.reps || ''),
+              weight: saved.weight ? String(saved.weight) : '',
+              reps: saved.reps ? String(saved.reps) : '',
               completed: saved.isCompleted || false,
               isWarmup: saved.isWarmup || false,
               tags: [],
@@ -440,31 +420,17 @@ export default function ActiveWorkout() {
             }));
           }
         });
-        if (__DEV__) {
-          console.log('📥 Workout progress restored from store');
-        }
+        if (__DEV__) console.log('📥 Workout progress restored from store');
       }
       
       setExercises(sessionExercises);
       
-      // Create schedule entry for today's workout
-      if (currentPlan && currentDay) {
-        syncEnsureTodaySchedule(currentPlan.id, {
-          name: currentDay.name,
-          muscleGroups: currentDay.muscleGroups,
-          exercises: currentDay.exercises,
-          dayName: currentDay.dayName,
-        });
-      }
-      
-      // Animate exercises entrance
+      // Init animations
       sessionExercises.forEach((ex, index) => {
         if (!exerciseAnimations.current.has(ex.id)) {
           exerciseAnimations.current.set(ex.id, new Animated.Value(0));
         }
-        const anim = exerciseAnimations.current.get(ex.id)!;
-        
-        Animated.spring(anim, {
+        Animated.spring(exerciseAnimations.current.get(ex.id)!, {
           toValue: 1,
           delay: index * 80,
           tension: 50,
@@ -473,7 +439,7 @@ export default function ActiveWorkout() {
         }).start();
       });
     }
-  }, [currentDay, currentPlan, exercises.length, activeWorkout.exerciseSets]);
+  }, [currentDay, exercises.length, activeWorkout.exerciseSets]);
 
   // Calculate workout stats
   const workoutStats = useMemo(() => {
@@ -533,7 +499,7 @@ export default function ActiveWorkout() {
       const sessionExercises = exercises
         .filter(ex => ex.sets.some(s => s.completed)) // Only include exercises with completed sets
         .map(ex => ({
-          exerciseId: ex.id,
+          exerciseId: ex.catalogExerciseId,
           sets: ex.sets
             .filter(s => s.completed) // Only include completed sets
             .map(s => ({
@@ -593,56 +559,39 @@ export default function ActiveWorkout() {
 
   // Handle adding a new set to an exercise
   const handleAddSet = (exerciseId: string) => {
-    // Trigger layout animation for smooth transition
     LayoutAnimation.configureNext(springConfig);
-    
-    setExercises((prev) =>
-      prev.map((ex) => {
-        if (ex.id !== exerciseId) return ex;
-        
-        const newSetId = ex.sets.length + 1;
-        const lastSet = ex.sets[ex.sets.length - 1];
-        
-        return {
-          ...ex,
-          sets: [
-            ...ex.sets,
-            {
-              id: newSetId,
-              weight: lastSet?.weight || '',
-              reps: lastSet?.reps || '',
-              completed: false,
-              isWarmup: false,
-              tags: [],
-              prevWeight: lastSet?.prevWeight,
-              prevReps: lastSet?.prevReps,
-            },
-          ],
-        };
-      })
-    );
+    const updatedExercises = exercises.map((ex) => {
+      if (ex.id !== exerciseId) return ex;
+      const newSetId = ex.sets.length + 1;
+      const lastSet = ex.sets[ex.sets.length - 1];
+      return {
+        ...ex,
+        sets: [...ex.sets, {
+          id: newSetId,
+          weight: lastSet?.weight || '',
+          reps: lastSet?.reps || '',
+          completed: false,
+          isWarmup: false,
+          tags: [],
+        }],
+      };
+    });
+    setExercises(updatedExercises);
+    persistProgress(updatedExercises); // 💾 Save
   };
 
   // Handle removing a set from an exercise (minimum 1 set)
   const handleRemoveSet = (exerciseId: string, setId: number) => {
-    // Trigger layout animation for smooth transition
     LayoutAnimation.configureNext(springConfig);
-    
-    setExercises((prev) =>
-      prev.map((ex) => {
-        if (ex.id !== exerciseId || ex.sets.length <= 1) return ex;
-        
-        // Remove the set and reindex remaining sets
-        const newSets = ex.sets
-          .filter((set) => set.id !== setId)
-          .map((set, index) => ({ ...set, id: index + 1 }));
-        
-        return {
-          ...ex,
-          sets: newSets,
-        };
-      })
-    );
+    const updatedExercises = exercises.map((ex) => {
+      if (ex.id !== exerciseId || ex.sets.length <= 1) return ex;
+      return {
+        ...ex,
+        sets: ex.sets.filter((s) => s.id !== setId).map((s, idx) => ({ ...s, id: idx + 1 })),
+      };
+    });
+    setExercises(updatedExercises);
+    persistProgress(updatedExercises); // 💾 Save
   };
 
   // Handle set completion - validates inputs and uses store rest timer
@@ -650,63 +599,39 @@ export default function ActiveWorkout() {
     const exercise = exercises.find((e) => e.id === exerciseId);
     const set = exercise?.sets.find((s) => s.id === setId);
     
-    if (!set) return;
-    
-    // If trying to complete (not uncomplete), validate inputs
-    if (!set.completed) {
+    if (set && !set.completed) {
       const weight = parseFloat(set.weight);
       const reps = parseInt(set.reps);
-      
       if (isNaN(weight) || weight <= 0 || isNaN(reps) || reps <= 0) {
-        Alert.alert(
-          'Missing Input',
-          'Please enter both weight and reps before marking the set as complete.',
-          [{ text: 'OK' }]
-        );
+        Alert.alert('Input Required', 'Enter weight and reps first.');
         return;
       }
     }
     
-    // Trigger layout animation for progress bar update
     LayoutAnimation.configureNext(springConfig);
-    
-    setExercises((prev) =>
-      prev.map((ex) =>
-        ex.id === exerciseId
-          ? {
-              ...ex,
-              sets: ex.sets.map((s) =>
-                s.id === setId ? { ...s, completed: !s.completed } : s
-              ),
-            }
-          : ex
-      )
+    const updatedExercises = exercises.map((ex) =>
+      ex.id === exerciseId
+        ? { ...ex, sets: ex.sets.map((s) => s.id === setId ? { ...s, completed: !s.completed } : s) }
+        : ex
     );
     
-    // Start rest timer only when completing (not uncompleting)
-    if (!set.completed && exercise) {
+    setExercises(updatedExercises);
+    persistProgress(updatedExercises); // 💾 Save immediately
+    
+    if (!set?.completed && exercise) {
       startRestTimer(exercise.restSeconds);
     }
   };
 
-  const handleInputChange = (
-    exerciseId: string,
-    setId: number,
-    field: 'weight' | 'reps',
-    value: string
-  ) => {
-    setExercises((prev) =>
-      prev.map((ex) =>
-        ex.id === exerciseId
-          ? {
-              ...ex,
-              sets: ex.sets.map((set) =>
-                set.id === setId ? { ...set, [field]: value } : set
-              ),
-            }
-          : ex
-      )
+  const handleInputChange = (exerciseId: string, setId: number, field: 'weight' | 'reps', value: string) => {
+    const updatedExercises = exercises.map((ex) =>
+      ex.id === exerciseId
+        ? { ...ex, sets: ex.sets.map((s) => s.id === setId ? { ...s, [field]: value } : s) }
+        : ex
     );
+    setExercises(updatedExercises);
+    // 💾 Save immediately (MMKV is fast enough)
+    persistProgress(updatedExercises); 
   };
 
   const handleSwapExercise = async (exerciseId: string, newExerciseId: string, newName: string) => {
@@ -1334,6 +1259,7 @@ export default function ActiveWorkout() {
             // Also add to local exercises state for immediate UI update
             const newExerciseData: ExerciseData = {
               id: newExercise.id,
+              catalogExerciseId: exerciseData.exerciseId,
               name: exerciseData.exercise?.name || exerciseData.exerciseId,
               muscleGroup: exerciseData.exercise?.muscleGroups[0] || '',
               equipment: exerciseData.exercise?.equipment?.[0] || '',

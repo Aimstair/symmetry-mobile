@@ -32,7 +32,8 @@ export function Modal({ open, onOpenChange, children }: ModalProps) {
         {/* Content Container - sits above backdrop */}
         <View style={styles.contentPosition}>
           <KeyboardAvoidingView 
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            enabled={Platform.OS === 'ios'}
             style={styles.keyboardView}
           >
             <View style={styles.contentWrapper}>
@@ -68,6 +69,9 @@ const styles = StyleSheet.create({
     maxWidth: 500,
     paddingHorizontal: 16,
     maxHeight: '90%',
+    zIndex: 2, // Ensure content is above backdrop
+    justifyContent: 'center', // Center content within the position wrapper
+    alignItems: 'center',
   },
   keyboardView: {
     width: '100%',

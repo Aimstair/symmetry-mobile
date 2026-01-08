@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { View, Text, ScrollView, Pressable, Animated, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -63,11 +63,14 @@ export default function Settings() {
   // Get store data and actions
   const user = useAppStore((s) => s.user);
   const isGuest = useAppStore((s) => s.isGuest);
+  
+  // ✅ FIX: Derive the real guest state. 
+  // If we have an email, we are NOT a guest, even if the store flag is stuck.
+  const isGuestAccount = isGuest && (!user?.email || user.email === '');
+
   const settings = useAppStore((s) => s.settings);
-  const equipment = useAppStore((s) => s.equipment);
   const nutritionTargets = useAppStore((s) => s.nutritionTargets);
   const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
-  const setNutritionTargets = useAppStore((s) => s.setNutritionTargets);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const resetStore = useAppStore((s) => s.resetStore);
   const isLoading = useAppStore((s) => s.isLoading);
@@ -122,7 +125,7 @@ export default function Settings() {
       section6Anim.setValue(0);
       section7Anim.setValue(0);
       
-      Animated.stagger(60, [
+      const animation = Animated.stagger(60, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section1Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section2Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
@@ -131,8 +134,15 @@ export default function Settings() {
         Animated.timing(section5Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section6Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section7Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
-      ]).start();
-    }, [headerAnim, section1Anim, section2Anim, section3Anim, section4Anim, section5Anim, section6Anim, section7Anim])
+      ]);
+      
+      animation.start();
+
+      // CLEANUP: Stop animation if user navigates away before it finishes
+      return () => {
+        animation.stop();
+      };
+    }, [])
   );
 
   const createAnimStyle = (anim: Animated.Value) => ({
@@ -158,7 +168,6 @@ export default function Settings() {
     
     try {
       // Convert input values to metric if user is in imperial mode
-      // (Database always stores metric)
       let heightInCm = parseFloat(profileForm.height) || user.height;
       let weightInKg = parseFloat(profileForm.weight) || user.weight;
 
@@ -179,8 +188,7 @@ export default function Settings() {
         trainingDays: user.trainingDays, // Preserve existing training days
       });
 
-      // B. Recalculate Nutrition Targets using metric values
-      // We assume workout frequency from the first plan, or default to 3 (Moderate)
+      // Recalculate Nutrition Targets
       const frequency = workoutPlans[0]?.daysPerWeek || 3;
       
       const newTargets = calculateNutritionTargets(
@@ -194,9 +202,7 @@ export default function Settings() {
         frequency
       );
 
-      // C. Save New Targets
       await syncUpdateNutritionTargets(newTargets);
-
       setShowProfileEdit(false);
 
     } catch (error) {
@@ -222,7 +228,6 @@ export default function Settings() {
               router.replace('/onboarding');
             } catch (error) {
               console.error('Sign out error:', error);
-              // Still reset store and redirect even if signOut fails
               resetStore();
               router.replace('/onboarding');
             }
@@ -238,7 +243,7 @@ export default function Settings() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState('');
 
-  // Notification toggles - synced with store
+  // Notification toggles
   const workoutReminders = settings.notifications.workoutReminders;
   const restTimerSound = settings.notifications.restTimerSound;
   const progressUpdates = settings.notifications.progressUpdates;
@@ -352,8 +357,8 @@ export default function Settings() {
             </Text>
           </Animated.View>
 
-          {/* Cloud Sync Section - Show for guests */}
-          {isGuest && (
+          {/* Cloud Sync Section - Show for GUESTS only */}
+          {isGuestAccount && (
             <Animated.View style={createAnimStyle(section1Anim)} className="mb-6">
               <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
                 Cloud Sync
@@ -394,7 +399,7 @@ export default function Settings() {
                 <View className="flex-1">
                   <Text className="font-bold text-foreground">{user?.name || 'Athlete'}</Text>
                   <Text className="text-sm text-muted-foreground">
-                    {isGuest ? 'Guest Account' : (user?.email || 'No email set')}
+                    {isGuestAccount ? 'Guest Account' : (user?.email || 'No email set')}
                   </Text>
                   {user?.goal && (
                     <Text className="text-xs text-primary mt-0.5">
@@ -649,7 +654,7 @@ export default function Settings() {
               </GlassCard>
 
               {/* Sign Out - only show for authenticated users */}
-              {!isGuest && (
+              {!isGuestAccount && (
                 <Pressable
                   onPress={handleSignOut}
                   style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
@@ -671,7 +676,9 @@ export default function Settings() {
                 <GlassCard className="flex-row items-center justify-between border-destructive/30">
                   <View className="flex-row items-center gap-3">
                     <Trash2 size={20} color="#EF4444" />
-                    <Text className="text-destructive">{isGuest ? 'Reset App Data' : 'Delete Account'}</Text>
+                    <Text className="text-destructive">
+                      {isGuestAccount ? 'Reset App Data' : 'Delete Account'}
+                    </Text>
                   </View>
                   <ChevronRight size={20} color="#EF4444" />
                 </GlassCard>

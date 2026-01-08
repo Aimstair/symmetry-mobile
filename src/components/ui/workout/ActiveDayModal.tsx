@@ -77,7 +77,7 @@ export function ActiveDayModal({ open, onOpenChange, dayName, onConfirm }: Activ
           </ModalDescription>
         </ModalHeader>
 
-        <View className="gap-4">
+        <View className="gap-4 min-h-[200px]">
           <View>
             <Label className="mb-1">Workout Name</Label>
             <Input

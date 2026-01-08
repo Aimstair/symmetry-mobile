@@ -184,7 +184,7 @@ export interface IProgressService {
   deleteMeasurementLog(id: string): Promise<void>;
   
   // Legacy Body Measurements (backwards compatibility)
-  getBodyMeasurements(userId: string): Promise<BodyMeasurement[]>;
+  getmeasurementLogs(userId: string): Promise<BodyMeasurement[]>;
   addBodyMeasurement(measurement: BodyMeasurement): Promise<BodyMeasurement>;
   
   // Physique Scans
