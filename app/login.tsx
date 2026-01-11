@@ -174,7 +174,7 @@ export default function Login() {
               <View className="absolute inset-0 bg-primary/30 rounded-3xl blur-xl scale-125" />
               <View className="w-28 h-28 rounded-3xl bg-card/80 items-center justify-center overflow-hidden">
                 <View className="absolute inset-0 bg-gradient-to-br from-primary/20 to-transparent" />
-                  <Image source={require('../assets/icon.png')} style={{ width: 120, height: 100, borderRadius: 24 }} />
+                  <Image source={require('../assets/logo.png')} style={{ width: 120, height: 100, borderRadius: 24 }} />
               </View>
             </View>
             
