@@ -10,17 +10,28 @@ import type { BodyMeasurement } from '@/types';
 interface LogWeightModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onSave: (weight: number) => Promise<void>; // Added this
+  currentUnit: string;
 }
 
-export function LogWeightModal({ open, onOpenChange }: LogWeightModalProps) {
+export function LogWeightModal({ open, onOpenChange, onSave, currentUnit }: LogWeightModalProps) {
   const [weight, setWeight] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const user = useAppStore((s) => s.user);
   const settings = useAppStore((s) => s.settings);
-  const syncAddBodyMeasurement = useAppStore((s) => s.syncAddBodyMeasurement);
+
+  const isValidInput = (val: string) => {
+    if (!val || val.trim() === '') return false;
+    // Regex for valid number (integer or decimal)
+    const strictPattern = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+    return strictPattern.test(val) && parseFloat(val) > 0;
+  };
+
+  const isFormValid = isValidInput(weight);
 
   const handleSave = async () => {
+    if (!isFormValid) return;
     if (!user || !weight) return;
 
     const weightNum = parseFloat(weight);
@@ -28,17 +39,10 @@ export function LogWeightModal({ open, onOpenChange }: LogWeightModalProps) {
 
     setIsSubmitting(true);
     try {
-      const newMeasurement: BodyMeasurement = {
-        id: `bm-weight-${Date.now()}`,
-        userId: user.id,
-        date: new Date(),
-        weight: weightNum,
-        measurements: {},
-      };
-
-      await syncAddBodyMeasurement(newMeasurement);
+      // ✅ Pass raw number to parent
+      await onSave(parseFloat(weight));
       
-      // Reset form and close
+      // Reset form on success
       setWeight('');
       onOpenChange(false);
     } catch (error) {
@@ -93,3 +97,4 @@ export function LogWeightModal({ open, onOpenChange }: LogWeightModalProps) {
     </Modal>
   );
 }
+

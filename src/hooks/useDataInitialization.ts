@@ -12,6 +12,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { dataService } from '@/services/dataServiceProvider';
+import { localService } from '@/services/LocalService';
 import { useAppStore } from '@/store/useAppStore';
 
 interface DataInitializationState {
@@ -42,6 +43,7 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
   const setNutritionTargets = useAppStore((s) => s.setNutritionTargets);
   const setEquipment = useAppStore((s) => s.setEquipment);
   const setWorkoutPlans = useAppStore((s) => s.setWorkoutPlans);
+  const isGuest = useAppStore((s) => s.isGuest);
 
   const initializeData = useCallback(async () => {
     if (!userId) {
@@ -60,12 +62,15 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
         console.log('📥 Initializing data for user:', userId);
       }
 
+      // Use LocalService directly for guest users to avoid UUID errors
+      const service = isGuest ? localService : dataService;
+
       // Fetch all data in parallel
       const [user, nutritionTargets, equipment, workoutPlans] = await Promise.all([
-        dataService.user.getUser(userId),
-        dataService.user.getNutritionTargets(userId),
-        dataService.user.getEquipment(userId),
-        dataService.workout.getWorkoutPlans(userId),
+        service.user.getUser(userId),
+        service.user.getNutritionTargets(userId),
+        service.user.getEquipment(userId),
+        service.workout.getWorkoutPlans(userId),
       ]);
 
       // Update store with fetched data
@@ -108,7 +113,7 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
         error: errorMessage,
       });
     }
-  }, [userId, setUser, setNutritionTargets, setEquipment, setWorkoutPlans]);
+  }, [userId, isGuest, setUser, setNutritionTargets, setEquipment, setWorkoutPlans]);
 
   // Initialize on mount and when userId changes
   useEffect(() => {
@@ -130,9 +135,10 @@ export function useProgressDataInitialization(userId: string | null) {
   const [error, setError] = useState<string | null>(null);
 
   // Use the bulk set methods instead of individual add methods
-  const setBodyMeasurements = useAppStore((s) => s.setBodyMeasurements);
+  const setMeasurementLogs = useAppStore((s) => s.setMeasurementLogs);
   const setPhysiqueScans = useAppStore((s) => s.setPhysiqueScans);
   const setCardioLogs = useAppStore((s) => s.setCardioLogs);
+  const isGuest = useAppStore((s) => s.isGuest);
 
   const loadProgressData = useCallback(async () => {
     if (!userId) return;
@@ -141,14 +147,17 @@ export function useProgressDataInitialization(userId: string | null) {
     setError(null);
 
     try {
+      // Use LocalService directly for guest users to avoid UUID errors
+      const service = isGuest ? localService : dataService;
+      
       const [measurements, scans, cardio] = await Promise.all([
-        dataService.progress.getBodyMeasurements(userId),
-        dataService.progress.getPhysiqueScans(userId),
-        dataService.progress.getCardioLogs(userId),
+        service.progress.getMeasurementLogs(userId),
+        service.progress.getPhysiqueScans(userId),
+        service.progress.getCardioLogs(userId),
       ]);
 
       // Set all data at once (replacing existing data with fresh data from server)
-      setBodyMeasurements(measurements);
+      setMeasurementLogs(measurements);
       setPhysiqueScans(scans);
       setCardioLogs(cardio);
 
@@ -168,7 +177,8 @@ export function useProgressDataInitialization(userId: string | null) {
     }
   }, [
     userId,
-    setBodyMeasurements,
+    isGuest,
+    setMeasurementLogs,
     setPhysiqueScans,
     setCardioLogs,
   ]);

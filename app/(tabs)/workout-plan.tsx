@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import * as React from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator, Alert, InteractionManager } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
@@ -81,7 +81,11 @@ export default function WorkoutPlanScreen() {
   // Fetch workout history when screen loads
   useFocusEffect(
     useCallback(() => {
-      syncFetchWorkoutHistory();
+      const task = InteractionManager.runAfterInteractions(() => {
+        syncFetchWorkoutHistory();
+      });
+
+      return () => task.cancel(); // Cleanup if we leave before it runs
     }, [syncFetchWorkoutHistory])
   );
 
@@ -144,21 +148,26 @@ export default function WorkoutPlanScreen() {
   // Reset selected day when week changes
   useFocusEffect(
     useCallback(() => {
-      const idx = findTodayIndex(calendarDays);
-      if (idx >= 0) {
-        setSelectedDay(idx);
-      }
-
-      // Reset and run animations
+      // Reset values
       headerAnim.setValue(0);
       calendarAnim.setValue(0);
       contentAnim.setValue(0);
-      Animated.stagger(80, [
+      
+      // Create animation composition
+      const animation = Animated.stagger(80, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(calendarAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(contentAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-      ]).start();
-    }, [headerAnim, calendarAnim, contentAnim, calendarDays])
+      ]);
+
+      // Start
+      animation.start();
+
+      // CLEANUP: Stop animation if user navigates away before it finishes
+      return () => {
+        animation.stop();
+      };
+    }, []) 
   );
 
   const createAnimStyle = (anim: Animated.Value) => ({
@@ -592,7 +601,7 @@ export default function WorkoutPlanScreen() {
                 <Text className="text-sm font-semibold text-muted-foreground mb-3 uppercase tracking-wide">Exercises</Text>
                 <View className="gap-2">
                   {dayExercises.map((exercise, i) => {
-                    const exerciseName = exercise.exercise?.name || exercise.exerciseId;
+                    const exerciseName = exercise.exercise?.name  || exercise.exerciseId;
                     const displayName = swappedExercises[exerciseName] || exerciseName;
                     const info = getExerciseInfo(exerciseName);
                     const isExpanded = expandedExercise === exercise.id;
@@ -605,7 +614,7 @@ export default function WorkoutPlanScreen() {
                               <Text className="text-sm font-bold text-foreground">{i + 1}</Text>
                             </View>
                             <View className="flex-1">
-                              <Text className="font-medium text-sm text-foreground">{displayName}</Text>
+                              <Text className="font-medium text-sm text-foreground">{exerciseName}</Text>
                               <Text className="text-xs text-muted-foreground">
                                 {exercise.targetSets} sets • {exercise.targetReps} reps
                               </Text>

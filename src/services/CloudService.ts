@@ -1081,6 +1081,10 @@ class CloudHistoryService implements IHistoryService {
 
 class CloudProgressService implements IProgressService {
   async getMeasurementLogs(userId: string): Promise<MeasurementLog[]> {
+    if (userId.startsWith('guest-')) {
+      return [];
+    }
+    
     const { data, error } = await supabase
       .from('measurement_logs')
       .select('*')
@@ -1218,7 +1222,7 @@ class CloudProgressService implements IProgressService {
   }
 
   // Legacy methods for backwards compatibility
-  async getBodyMeasurements(userId: string): Promise<BodyMeasurement[]> {
+  async getmeasurementLogs(userId: string): Promise<BodyMeasurement[]> {
     // Skip cloud query for guest users
     if (userId.startsWith('guest-')) {
       return [];

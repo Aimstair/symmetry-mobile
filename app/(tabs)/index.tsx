@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { View, Text, ScrollView, Pressable, Animated } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
 import { useAppStore } from '@/store/useAppStore';
@@ -7,6 +7,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { CircularProgress } from '@/components/ui/CircularProgress';
 import { Button } from '@/components/ui/button';
 import { mapWorkoutPlanToWeek, getWeekStart } from '@/utils/workoutCalendar';
+import { supabase } from '@/lib/supabase'; // ✅ Added for direct auth check
 import {
   ChevronRight,
   AlertTriangle,
@@ -21,35 +22,85 @@ import {
   Timer,
 } from 'lucide-react-native';
 
-/**
- * Dashboard Page - React Native Implementation
- * 
- * Migration Notes:
- * - Removed framer-motion animations (use react-native-reanimated if needed later)
- * - Replaced div with View
- * - Replaced p/h1/h2/h3/span with Text
- * - Replaced Link with router.push()
- * - lucide-react → lucide-react-native
- * - SafeAreaView handles notch/dynamic island
- * - ScrollView for scrollable content
- * - GlassCard component for frosted glass aesthetic
- */
-
 export default function Dashboard() {
   const { 
     user, 
+    setUser, // ✅ Needed to update store manually
     nutritionTargets, 
+    setNutritionTargets, // ✅ Needed to update store manually
     workoutPlans,
     physiqueScans,
-    bodyMeasurements,
+    measurementLogs,
     cardioLogs,
     workoutHistory,
   } = useAppStore();
+
   const headerAnim = React.useRef(new Animated.Value(0)).current;
   const card1Anim = React.useRef(new Animated.Value(0)).current;
   const card2Anim = React.useRef(new Animated.Value(0)).current;
   const card3Anim = React.useRef(new Animated.Value(0)).current;
   const card4Anim = React.useRef(new Animated.Value(0)).current;
+
+  // ✅ New State for Pull-to-Refresh
+  const [refreshing, setRefreshing] = React.useState(false);
+
+  // ✅ ROBUST DATA FETCHING FUNCTION
+  const refreshData = React.useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // 1. Check if we have a session
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        if (__DEV__) console.log('🔄 Dashboard: Fetching data for', session.user.email);
+
+        // 2. Fetch User Profile directly
+        const { data: profile, error: userError } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', session.user.id)
+          .single();
+
+        if (profile) {
+          // Update Store
+          setUser(profile);
+        }
+
+        // 3. Fetch Nutrition Targets
+        const { data: nutrition } = await supabase
+          .from('nutrition_targets')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .single();
+
+        if (nutrition) {
+          setNutritionTargets(nutrition);
+        }
+        
+        // (Optional) You could trigger other fetches here like workout plans
+      }
+    } catch (error) {
+      console.error('❌ Dashboard Refresh Error:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [setUser, setNutritionTargets]);
+
+  // ✅ ZOMBIE STATE CHECKER
+  // If we are logged in (session exists) but have NO user data (store is empty),
+  // automatically trigger a refresh.
+  React.useEffect(() => {
+    const checkZombieState = async () => {
+      if (!user) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          if (__DEV__) console.log('🧟 Zombie State Detected (Auth but no Data). Reviving...');
+          refreshData();
+        }
+      }
+    };
+    checkZombieState();
+  }, [user, refreshData]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -140,8 +191,8 @@ export default function Dashboard() {
   const symmetryScore = latestPhysiqueScan?.symmetryScore ?? null;
 
   // Get latest body measurement
-  const latestMeasurement = bodyMeasurements.length > 0 ? bodyMeasurements[0] : null;
-  const currentWeight = latestMeasurement?.weight ?? user?.weight ?? null;
+  const latestMeasurement = measurementLogs.length > 0 ? measurementLogs[0] : null;
+  const currentWeight = latestMeasurement?.weightKg ?? user?.weight ?? null;
 
   // Calculate workouts per week from plan
   const workoutsPerWeek = activePlan?.daysPerWeek ?? 0;
@@ -173,7 +224,7 @@ export default function Dashboard() {
     });
 
     // Add recent body measurements (with date validation)
-    bodyMeasurements.slice(0, 2).forEach(m => {
+    measurementLogs.slice(0, 2).forEach(m => {
       if (m.date) {
         const measurementDate = new Date(m.date);
         if (!isNaN(measurementDate.getTime())) {
@@ -181,7 +232,7 @@ export default function Dashboard() {
             id: `measurement-${m.id}`,
             type: 'measurement',
             title: 'Weight Update',
-            subtitle: `${m.weight} lbs`,
+            subtitle: `${m.weightKg} lbs`,
             date: measurementDate,
           });
         }
@@ -206,13 +257,24 @@ export default function Dashboard() {
 
     // Sort by date descending and take top 3
     return activities.sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, 3);
-  }, [physiqueScans, bodyMeasurements, cardioLogs]);
+  }, [physiqueScans, measurementLogs, cardioLogs]);
 
   const hasMissedWorkout = false;
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={['top']}>
-      <ScrollView className="flex-1 px-4 py-6">
+      <ScrollView 
+        className="flex-1 px-4 py-6"
+        // ✅ ADDED: Pull to Refresh Control
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refreshData}
+            tintColor="#31D5E3" // Primary color
+            colors={["#31D5E3"]} // Android color
+          />
+        }
+      >
         {/* Header */}
         <Animated.View style={createAnimStyle(headerAnim)} className="mb-8">
           <Text className="text-sm text-muted-foreground font-medium">

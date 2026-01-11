@@ -10,9 +10,11 @@ import type { BodyMeasurement } from '@/types';
 interface TapeMeasurementModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onSave: (data: { chest: number; waist: number; arms: number; thighs: number }) => Promise<void>;
+  unit: string;
 }
 
-export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModalProps) {
+export function TapeMeasurementModal({ open, onOpenChange, onSave, unit }: TapeMeasurementModalProps) {
   const [chest, setChest] = useState('');
   const [waist, setWaist] = useState('');
   const [arms, setArms] = useState('');
@@ -20,31 +22,40 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const user = useAppStore((s) => s.user);
-  const syncAddBodyMeasurement = useAppStore((s) => s.syncAddBodyMeasurement);
+  const syncAddBodyMeasurement = useAppStore((s) => s.syncAddMeasurementLog);
+
+  const unitLabel = unit === 'in' ? '(in)' : '(cm)';
+  // ✅ STRICT VALIDATION HELPER
+  // 1. Must not be empty
+  // 2. Must be a valid JavaScript number (excludes ".." and "abc")
+  // 3. Must not contain commas (common mistake) or spaces
+  const isValidInput = (val: string) => {
+    if (!val || val.trim() === '') return false;
+    if (val.includes(',') || val.includes(' ')) return false;
+    const num = Number(val);
+    return !isNaN(num) && isFinite(num) && num > 0;
+  };
+
+  // ✅ CHECK ALL FIELDS
+  const isFormValid = 
+    isValidInput(chest) && 
+    isValidInput(waist) && 
+    isValidInput(arms) && 
+    isValidInput(thighs);
 
   const handleSave = async () => {
-    if (!user) return;
-
-    const measurements: Record<string, number> = {};
-    if (chest) measurements.chest = parseFloat(chest);
-    if (waist) measurements.waist = parseFloat(waist);
-    if (arms) measurements.arms = parseFloat(arms);
-    if (thighs) measurements.thighs = parseFloat(thighs);
-
-    // At least one measurement required
-    if (Object.keys(measurements).length === 0) return;
+    if (!isFormValid) return;
 
     setIsSubmitting(true);
     try {
-      const newMeasurement: BodyMeasurement = {
-        id: `bm-tape-${Date.now()}`,
-        userId: user.id,
-        date: new Date(),
-        weight: user.weight, // Use current weight
-        measurements,
+      const payload = {
+        chest: parseFloat(chest),
+        waist: parseFloat(waist),
+        arms: parseFloat(arms),
+        thighs: parseFloat(thighs),
       };
 
-      await syncAddBodyMeasurement(newMeasurement);
+      await onSave(payload);
       
       // Reset form and close
       setChest('');
@@ -65,13 +76,13 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
         <ModalHeader onClose={() => onOpenChange(false)}>
           <ModalTitle>Log Tape Measurements</ModalTitle>
           <ModalDescription>
-            Enter your body measurements in inches
+            Enter your body measurements in {unit === 'in' ? 'inches' : 'cm'}
           </ModalDescription>
         </ModalHeader>
 
         <View className="gap-4">
           <View>
-            <Label className="mb-1">Chest</Label>
+            <Label className="mb-1">Chest <Text className="text-muted-foreground text-xs">{unitLabel}</Text></Label>
             <Input
               placeholder="e.g., 42.5"
               value={chest}
@@ -81,7 +92,7 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
           </View>
 
           <View>
-            <Label className="mb-1">Waist</Label>
+            <Label className="mb-1">Waist <Text className="text-muted-foreground text-xs">{unitLabel}</Text></Label>
             <Input
               placeholder="e.g., 32.0"
               value={waist}
@@ -91,7 +102,7 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
           </View>
 
           <View>
-            <Label className="mb-1">Arms (avg)</Label>
+            <Label className="mb-1">Arms avg <Text className="text-muted-foreground text-xs">{unitLabel}</Text></Label>
             <Input
               placeholder="e.g., 15.5"
               value={arms}
@@ -101,7 +112,7 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
           </View>
 
           <View>
-            <Label className="mb-1">Thighs (avg)</Label>
+            <Label className="mb-1">Thighs avg <Text className="text-muted-foreground text-xs">{unitLabel}</Text></Label>
             <Input
               placeholder="e.g., 24.0"
               value={thighs}
@@ -118,10 +129,12 @@ export function TapeMeasurementModal({ open, onOpenChange }: TapeMeasurementModa
             </Button>
           </View>
           <View className="flex-1">
+            {/* ✅ VISUAL FEEDBACK: Opacity change */}
             <Button 
-              className="bg-primary" 
+              className="bg-primary"
               onPress={handleSave}
-              disabled={isSubmitting || (!chest && !waist && !arms && !thighs)}
+              disabled={isSubmitting || !isFormValid}
+              style={{ opacity: isFormValid ? 1 : 0.5 }}
             >
               <Text className="text-primary-foreground font-semibold">
                 {isSubmitting ? 'Saving...' : 'Save'}

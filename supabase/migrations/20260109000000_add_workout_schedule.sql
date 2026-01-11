@@ -16,7 +16,7 @@
 -- Maps specific dates to planned workouts (before they're completed)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS workout_schedule (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   
   -- The specific date this workout is scheduled for
@@ -57,7 +57,7 @@ CREATE INDEX idx_workout_schedule_status ON workout_schedule(status);
 -- This prevents retroactive changes from affecting past weeks
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS training_days_history (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   
   -- The week this configuration was active (stores the Monday of that week)

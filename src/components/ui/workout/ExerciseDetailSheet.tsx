@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator } from 'react-native';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { Video, ResizeMode } from 'expo-av';
+import { getVideoForExercise } from '@/lib/videoRegistry';
 import {
   Timer,
   Check,
@@ -70,6 +72,7 @@ export function ExerciseDetailSheet({
   const [catalogExercise, setCatalogExercise] = useState<CatalogExercise | null>(null);
   const [alternatives, setAlternatives] = useState<CatalogExercise[]>([]);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const videoRef = useRef<any>(null);
   
   // Fetch exercise details and alternatives when exercise changes
   useEffect(() => {
@@ -132,6 +135,14 @@ export function ExerciseDetailSheet({
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
+  
+  const exerciseId = catalogExercise ? catalogExercise.id : exercise.id;
+  const videoSource = exerciseId ? getVideoForExercise(exerciseId) : null;
+  
+  // Debug: Log exercise ID to help match with video registry
+  if (__DEV__ && !videoSource) {
+    console.log('🎥 No video found for exercise ID:', exerciseId, '| Exercise name:', exercise.name);
+  }
 
   return (
     <Modal
@@ -165,12 +176,28 @@ export function ExerciseDetailSheet({
             <View className="p-4 gap-4 pb-8">
               {/* Video/Animation Placeholder */}
               <GlassCard className="overflow-hidden p-0">
-                <View className="bg-muted/50 items-center justify-center relative" style={{ aspectRatio: 16/9 }}>
-                  <View className="w-24 h-24 rounded-full bg-primary/20 items-center justify-center">
-                    <Play size={40} color="#31D5E3" style={{ marginLeft: 4 }} />
+                {videoSource ? (
+                  <Video
+                    ref={videoRef}
+                    source={videoSource}
+                    style={{ width: '100%', aspectRatio: 16 / 9 }}
+                    resizeMode={ResizeMode.COVER}
+                    useNativeControls={true} // Allows user to scrub/fullscreen
+                    isLooping={true}
+                    shouldPlay={true} // Don't auto-play to save battery/data? Or set to true.
+                    isMuted={true} // Usually better for gym apps
+                  />
+                ) : (
+                  /* Fallback Placeholder (Your original design) */
+                  <View className="bg-muted/50 items-center justify-center relative" style={{ aspectRatio: 16 / 9 }}>
+                    <View className="w-24 h-24 rounded-full bg-muted/20 items-center justify-center">
+                      <AlertCircle size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                    </View>
+                    <Text className="text-sm text-muted-foreground mt-3">
+                      No demonstration video available
+                    </Text>
                   </View>
-                  <Text className="text-sm text-muted-foreground mt-3">Tap to play form video</Text>
-                </View>
+                )}
               </GlassCard>
 
               {/* Muscle Groups */}
@@ -385,3 +412,4 @@ export function ExerciseDetailSheet({
     </Modal>
   );
 }
+
