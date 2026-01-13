@@ -25,6 +25,7 @@ import type {
   IProgressService,
   IUserService,
   IScheduleService,
+  FeedbackSubmission,
 } from './interfaces';
 import type {
   User,
@@ -1721,6 +1722,29 @@ class CloudUserService implements IUserService {
       hasBands: data.has_bands,
       customEquipment: data.custom_equipment || [],
     };
+  }
+
+  async submitFeedback(userId: string | null, feedback: FeedbackSubmission): Promise<void> {
+    const { error } = await supabase
+      .from('user_feedback')
+      .insert({
+        user_id: userId && !userId.startsWith('guest-') ? userId : null,
+        email: feedback.email || null,
+        message: feedback.message,
+        category: feedback.category || 'general',
+        device_model: feedback.deviceModel || null,
+        device_os: feedback.deviceOs || null,
+        app_version: feedback.appVersion || null,
+      });
+
+    if (error) {
+      console.error('Failed to submit feedback:', error);
+      throw new Error(`Failed to submit feedback: ${error.message}`);
+    }
+
+    if (__DEV__) {
+      console.log('✅ Feedback submitted successfully');
+    }
   }
 }
 

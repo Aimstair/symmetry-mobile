@@ -11,6 +11,7 @@
  */
 
 import { getStorageItem, setStorageItem } from '@/lib/storage';
+import { addBreadcrumb } from '@/lib/monitoring';
 import type {
   IDataService,
   IExerciseService,
@@ -19,6 +20,7 @@ import type {
   IProgressService,
   IUserService,
   IScheduleService,
+  FeedbackSubmission,
 } from './interfaces';
 import type {
   User,
@@ -38,16 +40,16 @@ import type {
 /**
  * Helper: Get data from storage
  */
-function getStorageData<T>(key: string): T[] {
-  const data = getStorageItem<T[]>(key);
+async function getStorageData<T>(key: string): Promise<T[]> {
+  const data = await getStorageItem<T[]>(key);
   return data || [];
 }
 
 /**
  * Helper: Set data in storage
  */
-function setStorageDataArray<T>(key: string, data: T[]): void {
-  setStorageItem(key, data);
+async function setStorageDataArray<T>(key: string, data: T[]): Promise<void> {
+  await setStorageItem(key, data);
 }
 
 /**
@@ -57,19 +59,26 @@ class LocalWorkoutService implements IWorkoutService {
   private readonly STORAGE_KEY = 'workout_plans';
 
   async getWorkoutPlans(userId: string): Promise<WorkoutPlan[]> {
-    const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
+    const plans = await getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     return plans.filter((p) => p.userId === userId);
   }
 
   async getWorkoutPlan(id: string): Promise<WorkoutPlan | null> {
-    const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
+    const plans = await getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     return plans.find((p) => p.id === id) ?? null;
   }
 
   async createWorkoutPlan(plan: WorkoutPlan): Promise<WorkoutPlan> {
-    const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
+    // Add breadcrumb for debugging crashes
+    addBreadcrumb('Creating workout plan', 'workout', {
+      planId: plan.id,
+      planName: plan.name,
+      daysCount: plan.workoutDays?.length || 0,
+    });
+    
+    const plans = await getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     plans.push(plan);
-    setStorageDataArray(this.STORAGE_KEY, plans);
+    await setStorageDataArray(this.STORAGE_KEY, plans);
     return plan;
   }
 
@@ -77,19 +86,22 @@ class LocalWorkoutService implements IWorkoutService {
     id: string,
     updates: Partial<WorkoutPlan>
   ): Promise<WorkoutPlan> {
-    const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
+    // Add breadcrumb for debugging crashes
+    addBreadcrumb('Updating workout plan', 'workout', { planId: id });
+    
+    const plans = await getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     const index = plans.findIndex((p) => p.id === id);
     if (index === -1) throw new Error(`Workout plan ${id} not found`);
 
     plans[index] = { ...plans[index], ...updates };
-    setStorageDataArray(this.STORAGE_KEY, plans);
+    await setStorageDataArray(this.STORAGE_KEY, plans);
     return plans[index];
   }
 
   async deleteWorkoutPlan(id: string): Promise<void> {
-    const plans = getStorageData<WorkoutPlan>(this.STORAGE_KEY);
+    const plans = await getStorageData<WorkoutPlan>(this.STORAGE_KEY);
     const filtered = plans.filter((p) => p.id !== id);
-    setStorageDataArray(this.STORAGE_KEY, filtered);
+    await setStorageDataArray(this.STORAGE_KEY, filtered);
   }
   
   // Day-level operations (stubs for local)
@@ -134,66 +146,66 @@ class LocalProgressService implements IProgressService {
 
   // New normalized measurement logs
   async getMeasurementLogs(userId: string): Promise<any[]> {
-    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const data = await getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
     return data.filter((m: any) => m.userId === userId);
   }
   
   async addMeasurementLog(log: any): Promise<any> {
-    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const data = await getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
     const newLog = { ...log, id: `ml_${Date.now()}`, createdAt: new Date() };
     data.push(newLog);
-    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
+    await setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
     return newLog;
   }
   
   async updateMeasurementLog(id: string, updates: any): Promise<any> {
-    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const data = await getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
     const index = data.findIndex((m: any) => m.id === id);
     if (index === -1) throw new Error(`MeasurementLog ${id} not found`);
     data[index] = { ...data[index], ...updates };
-    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
+    await setStorageDataArray(this.MEASUREMENT_LOGS_KEY, data);
     return data[index];
   }
   
   async deleteMeasurementLog(id: string): Promise<void> {
-    const data = getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
+    const data = await getStorageData<any>(this.MEASUREMENT_LOGS_KEY);
     const filtered = data.filter((m: any) => m.id !== id);
-    setStorageDataArray(this.MEASUREMENT_LOGS_KEY, filtered);
+    await setStorageDataArray(this.MEASUREMENT_LOGS_KEY, filtered);
   }
 
   async getmeasurementLogs(userId: string): Promise<BodyMeasurement[]> {
-    const data = getStorageData<BodyMeasurement>(this.BODY_KEY);
+    const data = await getStorageData<BodyMeasurement>(this.BODY_KEY);
     return data.filter((m) => m.userId === userId);
   }
 
   async addBodyMeasurement(measurement: BodyMeasurement): Promise<BodyMeasurement> {
-    const data = getStorageData<BodyMeasurement>(this.BODY_KEY);
+    const data = await getStorageData<BodyMeasurement>(this.BODY_KEY);
     data.push(measurement);
-    setStorageDataArray(this.BODY_KEY, data);
+    await setStorageDataArray(this.BODY_KEY, data);
     return measurement;
   }
 
   async getPhysiqueScans(userId: string): Promise<PhysiqueScan[]> {
-    const data = getStorageData<PhysiqueScan>(this.SCAN_KEY);
+    const data = await getStorageData<PhysiqueScan>(this.SCAN_KEY);
     return data.filter((s) => s.userId === userId);
   }
 
   async addPhysiqueScan(scan: PhysiqueScan): Promise<PhysiqueScan> {
-    const data = getStorageData<PhysiqueScan>(this.SCAN_KEY);
+    const data = await getStorageData<PhysiqueScan>(this.SCAN_KEY);
     data.push(scan);
-    setStorageDataArray(this.SCAN_KEY, data);
+    await setStorageDataArray(this.SCAN_KEY, data);
     return scan;
   }
 
   async getCardioLogs(userId: string): Promise<CardioLog[]> {
-    const data = getStorageData<CardioLog>(this.CARDIO_KEY);
+    const data = await getStorageData<CardioLog>(this.CARDIO_KEY);
     return data.filter((l) => l.userId === userId);
   }
 
   async addCardioLog(log: CardioLog): Promise<CardioLog> {
-    const data = getStorageData<CardioLog>(this.CARDIO_KEY);
+    const data = await getStorageData<CardioLog>(this.CARDIO_KEY);
     data.push(log);
-    setStorageDataArray(this.CARDIO_KEY, data);
+    await setStorageDataArray(this.CARDIO_KEY, data);
     return log;
   }
 }
@@ -219,7 +231,7 @@ class LocalUserService implements IUserService {
   }
 
   async createUser(user: User): Promise<User> {
-    setStorageItem(this.USER_KEY, user);
+    await setStorageItem(this.USER_KEY, user);
     return user;
   }
 
@@ -227,7 +239,7 @@ class LocalUserService implements IUserService {
     const current = await this.getUser(userId);
     if (!current) throw new Error('User not found');
     const updated = { ...current, ...updates };
-    setStorageItem(this.USER_KEY, updated);
+    await setStorageItem(this.USER_KEY, updated);
     return updated;
   }
 
@@ -235,7 +247,7 @@ class LocalUserService implements IUserService {
     userId: string,
     targets: NutritionTargets
   ): Promise<NutritionTargets> {
-    setStorageItem(this.NUTRITION_KEY, targets);
+    await setStorageItem(this.NUTRITION_KEY, targets);
     return targets;
   }
 
@@ -243,8 +255,29 @@ class LocalUserService implements IUserService {
     userId: string,
     equipment: EquipmentProfile
   ): Promise<EquipmentProfile> {
-    setStorageItem(this.EQUIPMENT_KEY, equipment);
+    await setStorageItem(this.EQUIPMENT_KEY, equipment);
     return equipment;
+  }
+
+  async submitFeedback(userId: string | null, feedback: FeedbackSubmission): Promise<void> {
+    // Local service stores feedback locally for potential future sync
+    // For now, just log it in dev mode - actual submission requires cloud
+    if (__DEV__) {
+      console.log('📝 Local feedback stored (requires cloud sync):', {
+        userId,
+        message: feedback.message,
+        category: feedback.category,
+      });
+    }
+    // Store locally for potential later sync
+    const feedbackKey = 'local_feedback';
+    const existingFeedback = await getStorageData<any>(feedbackKey);
+    existingFeedback.push({
+      userId,
+      ...feedback,
+      createdAt: new Date().toISOString(),
+    });
+    await setStorageDataArray(feedbackKey, existingFeedback);
   }
 }
 
@@ -293,6 +326,12 @@ class LocalExerciseService implements IExerciseService {
  */
 class LocalHistoryService implements IHistoryService {
   async saveWorkoutSession(input: any): Promise<any> {
+    // Add breadcrumb for debugging crashes
+    addBreadcrumb('Saving workout session (local)', 'workout', {
+      name: input.name,
+      exerciseCount: input.exercises?.length || 0,
+    });
+    
     return { ...input, id: `session_${Date.now()}` };
   }
   

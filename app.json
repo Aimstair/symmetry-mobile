@@ -32,11 +32,6 @@
       },
       "package": "com.symmetry.fitness",
       "versionCode": 1,
-      "permissions": [
-        "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
-      ],
       "newArchEnabled": true
     },
     "web": {
@@ -47,15 +42,32 @@
       "expo-router",
       "expo-apple-authentication",
       [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
+          }
+        }
+      ],
+      [
         "expo-camera",
         {
-          "cameraPermission": "Allow Symmetry to access your camera for physique scans."
+          "cameraPermission": "Allow Symmetry to access your camera for physique scans.",
+          "microphonePermission": "Allow Symmetry to access your microphone for video recordings.",
+          "recordAudioAndroid": true
         }
       ],
       [
         "expo-image-picker",
         {
           "photosPermission": "Allow Symmetry to access your photos for progress tracking."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#31D5E3"
         }
       ]
     ],

@@ -8,12 +8,14 @@
  * - Loads user, workout plans, and progress data
  * - Provides loading/error states for UI rendering
  * - Automatically syncs data service with store
+ * - Runs cache cleanup on app launch
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { dataService } from '@/services/dataServiceProvider';
 import { localService } from '@/services/LocalService';
 import { useAppStore } from '@/store/useAppStore';
+import { runCacheCleanup } from '@/lib/cacheManager';
 
 interface DataInitializationState {
   isLoading: boolean;
@@ -44,8 +46,17 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
   const setEquipment = useAppStore((s) => s.setEquipment);
   const setWorkoutPlans = useAppStore((s) => s.setWorkoutPlans);
   const isGuest = useAppStore((s) => s.isGuest);
+  
+  // Track if cache cleanup has run this session
+  const cacheCleanupRan = useRef(false);
 
   const initializeData = useCallback(async () => {
+    // Run cache cleanup once per app session (silently in background)
+    if (!cacheCleanupRan.current) {
+      cacheCleanupRan.current = true;
+      runCacheCleanup(); // Fire and forget - don't await
+    }
+    
     if (!userId) {
       setState({
         isLoading: false,

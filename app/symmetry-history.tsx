@@ -1,10 +1,13 @@
-import { useState, useMemo } from 'react';
-import { View, Text, ScrollView, Pressable, Dimensions } from 'react-native';
+import { useState, useMemo, useCallback, useEffect } from 'react';
+import { View, Text, ScrollView, Pressable, Dimensions, ActivityIndicator } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAppStore } from '@/store/useAppStore';
+import { supabase } from '@/lib/supabase';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   ArrowLeft, 
@@ -16,6 +19,7 @@ import {
   Calendar,
   Target,
   Camera,
+  Dumbbell,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
@@ -23,6 +27,9 @@ import type { PhysiqueScan } from '@/types';
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64;
+
+// Pagination constants
+const PAGE_SIZE = 20;
 
 // Muscle display name mapping
 const MUSCLE_DISPLAY_NAMES: Record<string, string> = {
@@ -157,12 +164,106 @@ export default function SymmetryHistory() {
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
 
-  // Connect to store
-  const physiqueScans = useAppStore((state) => state.physiqueScans);
+  // Pagination state for History tab
+  const [paginatedScans, setPaginatedScans] = useState<PhysiqueScan[]>([]);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [hasMoreScans, setHasMoreScans] = useState(true);
+  const [lastCursor, setLastCursor] = useState<string | null>(null);
 
-  // Derive all data from physiqueScans
+  // Connect to store (used for overview/chart - always has all local data)
+  const physiqueScans = useAppStore((state) => state.physiqueScans);
+  const user = useAppStore((state) => state.user);
+
+  // Fetch paginated scans from Supabase
+  const fetchScans = useCallback(async (cursor?: string | null) => {
+    if (!user?.id) return;
+    
+    try {
+      let query = supabase
+        .from('physique_scans')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('date', { ascending: false })
+        .limit(PAGE_SIZE);
+      
+      // Cursor-based pagination: fetch scans older than the cursor
+      if (cursor) {
+        query = query.lt('date', cursor);
+      }
+      
+      const { data, error } = await query;
+      
+      if (error) {
+        if (__DEV__) console.error('Failed to fetch paginated scans:', error);
+        return;
+      }
+      
+      if (data) {
+        // Transform database records to PhysiqueScan type
+        const transformedScans: PhysiqueScan[] = data.map((scan: any) => ({
+          id: scan.id,
+          userId: scan.user_id,
+          date: new Date(scan.date),
+          images: scan.images || {},
+          muscleScores: scan.muscle_scores || {
+            chest: 0,
+            back: 0,
+            shoulders: 0,
+            arms: 0,
+            legs: 0,
+          },
+          symmetryScore: scan.symmetry_score || 0,
+          notes: scan.notes,
+        }));
+        
+        if (cursor) {
+          // Append to existing scans
+          setPaginatedScans(prev => [...prev, ...transformedScans]);
+        } else {
+          // Initial load - replace
+          setPaginatedScans(transformedScans);
+        }
+        
+        // Update cursor for next page
+        if (transformedScans.length > 0) {
+          const lastScan = transformedScans[transformedScans.length - 1];
+          setLastCursor(new Date(lastScan.date).toISOString());
+        }
+        
+        // Check if there are more scans
+        setHasMoreScans(transformedScans.length === PAGE_SIZE);
+      }
+    } catch (error) {
+      if (__DEV__) console.error('Error fetching scans:', error);
+    }
+  }, [user?.id]);
+
+  // Initial load when switching to History tab
+  useEffect(() => {
+    if (activeTab === 'history' && isInitialLoad && user?.id) {
+      setIsInitialLoad(false);
+      fetchScans(null);
+    }
+  }, [activeTab, isInitialLoad, user?.id, fetchScans]);
+
+  // Load more scans handler
+  const loadMoreScans = useCallback(async () => {
+    if (isLoadingMore || !hasMoreScans || !lastCursor) return;
+    
+    setIsLoadingMore(true);
+    await fetchScans(lastCursor);
+    setIsLoadingMore(false);
+  }, [isLoadingMore, hasMoreScans, lastCursor, fetchScans]);
+
+  // Transform paginated scans for history list display
+  const paginatedHistoryList = useMemo(() => 
+    transformToHistoryList(paginatedScans), 
+    [paginatedScans]
+  );
+
+  // Derive all data from physiqueScans (local store for overview)
   const chartData = useMemo(() => transformToChartData(physiqueScans), [physiqueScans]);
-  const historyList = useMemo(() => transformToHistoryList(physiqueScans), [physiqueScans]);
   const muscleAnalysis = useMemo(() => getCurrentMuscleAnalysis(physiqueScans), [physiqueScans]);
   const muscleHistory = useMemo(() => getMuscleHistoryData(physiqueScans), [physiqueScans]);
 
@@ -502,79 +603,109 @@ export default function SymmetryHistory() {
               ))}
             </TabsContent>
 
-            {/* History Tab */}
+            {/* History Tab - Uses FlatList with Infinite Scroll */}
             <TabsContent value="history" className="gap-4">
               <View className="flex-row items-center gap-2 mb-4">
                 <Calendar size={20} color="#31D5E3" />
                 <Text className="text-lg font-semibold text-foreground">Scan History</Text>
+                <Text className="text-xs text-muted-foreground ml-auto">
+                  {paginatedHistoryList.length} scans
+                </Text>
               </View>
 
-              {historyList.map((scan) => (
-                <Pressable
-                  key={scan.id}
-                  onPress={() => setSelectedScanId(selectedScanId === scan.id ? null : scan.id)}
-                  style={({ pressed }) => ({
-                    opacity: pressed ? 0.7 : 1,
-                  })}
-                >
-                  <GlassCard>
-                    <View className="flex-row items-center justify-between">
-                      <View>
-                        <Text className="font-medium text-foreground">{scan.date}</Text>
-                        <Text className="text-xs text-muted-foreground">Physique Scan</Text>
-                      </View>
-                      <View className="flex-row items-center gap-3">
-                        {scan.change !== 0 && (
-                          <View className="flex-row items-center gap-0.5">
-                            {scan.change > 0 ? (
-                              <>
-                                <ArrowUp size={12} color="#4ADE80" />
-                                <Text className="text-success text-xs font-medium">+{scan.change}</Text>
-                              </>
-                            ) : (
-                              <>
-                                <ArrowDown size={12} color="#EF4444" />
-                                <Text className="text-destructive text-xs font-medium">{scan.change}</Text>
-                              </>
+              {paginatedHistoryList.length === 0 && !isInitialLoad ? (
+                <GlassCard className="items-center py-8">
+                  <Calendar size={32} color="#71717A" style={{ opacity: 0.5 }} />
+                  <Text className="text-muted-foreground mt-2">No scan history yet</Text>
+                </GlassCard>
+              ) : (
+                <FlashList
+                  data={paginatedHistoryList}
+                  keyExtractor={(item) => item.id}
+                  scrollEnabled={false} // Parent ScrollView handles scrolling
+                  onEndReached={loadMoreScans}
+                  onEndReachedThreshold={0.5}
+                  estimatedItemSize={200}
+                  renderItem={({ item: scan }) => (
+                    <Pressable
+                      onPress={() => setSelectedScanId(selectedScanId === scan.id ? null : scan.id)}
+                      style={({ pressed }) => ({
+                        opacity: pressed ? 0.7 : 1,
+                        marginBottom: 12,
+                      })}
+                    >
+                      <GlassCard>
+                        <View className="flex-row items-center justify-between">
+                          <View>
+                            <Text className="font-medium text-foreground">{scan.date}</Text>
+                            <Text className="text-xs text-muted-foreground">Physique Scan</Text>
+                          </View>
+                          <View className="flex-row items-center gap-3">
+                            {scan.change !== 0 && (
+                              <View className="flex-row items-center gap-0.5">
+                                {scan.change > 0 ? (
+                                  <>
+                                    <ArrowUp size={12} color="#4ADE80" />
+                                    <Text className="text-success text-xs font-medium">+{scan.change}</Text>
+                                  </>
+                                ) : (
+                                  <>
+                                    <ArrowDown size={12} color="#EF4444" />
+                                    <Text className="text-destructive text-xs font-medium">{scan.change}</Text>
+                                  </>
+                                )}
+                              </View>
                             )}
+                            <Text className="text-2xl font-bold text-primary">{scan.score}</Text>
+                          </View>
+                        </View>
+
+                        {/* Expanded Details */}
+                        {selectedScanId === scan.id && (
+                          <View className="mt-4 pt-4 border-t border-border">
+                            <Text className="text-xs text-muted-foreground uppercase tracking-wide mb-3">
+                              Muscle Breakdown
+                            </Text>
+                            <View className="flex-row flex-wrap gap-2">
+                              {scan.muscles.map((muscle) => (
+                                <View key={muscle.muscle} className="w-[48%] flex-row items-center justify-between">
+                                  <View className="flex-row items-center gap-2">
+                                    <View className={cn(
+                                      'w-2 h-2 rounded-full',
+                                      muscle.status === 'strong' && 'bg-success',
+                                      muscle.status === 'balanced' && 'bg-primary',
+                                      muscle.status === 'lagging' && 'bg-destructive'
+                                    )} />
+                                    <Text className="text-xs text-foreground">{muscle.muscle}</Text>
+                                  </View>
+                                  <Text className={cn(
+                                    'text-xs font-bold',
+                                    getStatusColor(muscle.status)
+                                  )}>
+                                    {muscle.score}
+                                  </Text>
+                                </View>
+                              ))}
+                            </View>
                           </View>
                         )}
-                        <Text className="text-2xl font-bold text-primary">{scan.score}</Text>
+                      </GlassCard>
+                    </Pressable>
+                  )}
+                  ListFooterComponent={() => (
+                    isLoadingMore ? (
+                      <View className="py-4 items-center">
+                        <ActivityIndicator size="small" color="#31D5E3" />
+                        <Text className="text-xs text-muted-foreground mt-2">Loading more...</Text>
                       </View>
-                    </View>
-
-                    {/* Expanded Details */}
-                    {selectedScanId === scan.id && (
-                      <View className="mt-4 pt-4 border-t border-border">
-                        <Text className="text-xs text-muted-foreground uppercase tracking-wide mb-3">
-                          Muscle Breakdown
-                        </Text>
-                        <View className="flex-row flex-wrap gap-2">
-                          {scan.muscles.map((muscle) => (
-                            <View key={muscle.muscle} className="w-[48%] flex-row items-center justify-between">
-                              <View className="flex-row items-center gap-2">
-                                <View className={cn(
-                                  'w-2 h-2 rounded-full',
-                                  muscle.status === 'strong' && 'bg-success',
-                                  muscle.status === 'balanced' && 'bg-primary',
-                                  muscle.status === 'lagging' && 'bg-destructive'
-                                )} />
-                                <Text className="text-xs text-foreground">{muscle.muscle}</Text>
-                              </View>
-                              <Text className={cn(
-                                'text-xs font-bold',
-                                getStatusColor(muscle.status)
-                              )}>
-                                {muscle.score}
-                              </Text>
-                            </View>
-                          ))}
-                        </View>
+                    ) : !hasMoreScans && paginatedHistoryList.length > 0 ? (
+                      <View className="py-4 items-center">
+                        <Text className="text-xs text-muted-foreground">No more scans</Text>
                       </View>
-                    )}
-                  </GlassCard>
-                </Pressable>
-              ))}
+                    ) : null
+                  )}
+                />
+              )}
             </TabsContent>
           </Tabs>
         </View>

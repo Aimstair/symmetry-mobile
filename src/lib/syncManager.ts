@@ -12,6 +12,7 @@
 import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 import { storageAdapter } from './storage';
 import { supabase, checkSupabaseConnection } from '@/lib/supabase';
+import { addBreadcrumb } from '@/lib/monitoring';
 import type { WorkoutPlan, WorkoutSession, PhysiqueScan, User } from '@/types';
 
 // ============================================================================
@@ -29,6 +30,8 @@ export interface PendingSyncItem {
   createdAt: Date;
   attempts: number;
   lastError?: string;
+  requiresManualRetry?: boolean; // Dead Letter Queue flag
+  nextRetryAt?: number; // Timestamp for next retry
 }
 
 export interface SyncStatus {
@@ -60,6 +63,20 @@ class OfflineSyncManager {
   private listeners: Set<(status: SyncStatus) => void> = new Set();
   private unsubscribeNetInfo: (() => void) | null = null;
   private syncInterval: ReturnType<typeof setInterval> | null = null;
+  private backoffTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  
+  // Maximum retry attempts before moving to Dead Letter Queue
+  private static readonly MAX_RETRY_ATTEMPTS = 10;
+
+  /**
+   * Calculate exponential backoff delay
+   * Formula: min(30s, 2^attempts * 1s + random jitter)
+   */
+  private calculateBackoff(attempts: number): number {
+    const baseDelay = Math.pow(2, attempts) * 1000;
+    const jitter = Math.random() * 1000;
+    return Math.min(30000, baseDelay + jitter);
+  }
 
   constructor() {
     this.initialize();
@@ -131,13 +148,54 @@ class OfflineSyncManager {
 
   /**
    * Start periodic sync interval
+   * Only syncs items that are ready (not in backoff and not in DLQ)
    */
   private startPeriodicSync() {
+    // Check every 5 seconds for items ready to sync
     this.syncInterval = setInterval(() => {
-      if (this.isOnline && this.pendingQueue.length > 0) {
+      if (this.isOnline && this.hasRetryableItems()) {
         this.syncPendingItems();
       }
-    }, 30000); // Every 30 seconds
+    }, 5000);
+  }
+
+  /**
+   * Check if there are items ready to be retried
+   */
+  private hasRetryableItems(): boolean {
+    const now = Date.now();
+    return this.pendingQueue.some(
+      item => !item.requiresManualRetry && 
+              (!item.nextRetryAt || item.nextRetryAt <= now)
+    );
+  }
+
+  /**
+   * Schedule a retry with exponential backoff
+   */
+  private scheduleRetry(item: PendingSyncItem): void {
+    // Clear any existing timeout for this item
+    const existingTimeout = this.backoffTimeouts.get(item.id);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+
+    const backoffDelay = this.calculateBackoff(item.attempts);
+    item.nextRetryAt = Date.now() + backoffDelay;
+    this.savePendingQueue();
+
+    if (__DEV__) {
+      console.log(`⏱️ Scheduling retry for ${item.tableName}:${item.recordId} in ${Math.round(backoffDelay / 1000)}s (attempt ${item.attempts})`);
+    }
+
+    const timeout = setTimeout(() => {
+      this.backoffTimeouts.delete(item.id);
+      if (this.isOnline) {
+        this.syncPendingItems();
+      }
+    }, backoffDelay);
+
+    this.backoffTimeouts.set(item.id, timeout);
   }
 
   /**
@@ -149,6 +207,13 @@ class OfflineSyncManager {
     recordId: string,
     payload: any
   ): Promise<void> {
+    // Add breadcrumb for debugging
+    addBreadcrumb(`Queuing ${operation} on ${tableName}`, 'sync', {
+      operation,
+      tableName,
+      recordId,
+    });
+    
     const item: PendingSyncItem = {
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       operation,
@@ -182,11 +247,31 @@ class OfflineSyncManager {
 
   /**
    * Sync all pending items to the cloud
+   * Uses batching to reduce network requests
+   * Skips items in Dead Letter Queue or still in backoff
    */
   async syncPendingItems(): Promise<{ success: number; failed: number }> {
     if (this.isSyncing || !this.isOnline || this.pendingQueue.length === 0) {
       return { success: 0, failed: 0 };
     }
+    
+    // Filter out items that aren't ready for sync
+    const now = Date.now();
+    const itemsToSync = this.pendingQueue.filter(
+      item => !item.requiresManualRetry && 
+              (!item.nextRetryAt || item.nextRetryAt <= now)
+    );
+    
+    if (itemsToSync.length === 0) {
+      return { success: 0, failed: 0 };
+    }
+    
+    // Add breadcrumb for debugging
+    addBreadcrumb('Starting sync', 'sync', {
+      pendingCount: this.pendingQueue.length,
+      syncingCount: itemsToSync.length,
+      dlqCount: this.pendingQueue.filter(i => i.requiresManualRetry).length,
+    });
     
     this.isSyncing = true;
     this.notifyListeners();
@@ -194,30 +279,73 @@ class OfflineSyncManager {
     let success = 0;
     let failed = 0;
     
-    // Process queue items
-    const itemsToProcess = [...this.pendingQueue];
+    // Group items by table and operation for batching
+    const batches = new Map<string, PendingSyncItem[]>();
     
-    for (const item of itemsToProcess) {
+    for (const item of itemsToSync) {
+      const key = `${item.tableName}:${item.operation}`;
+      if (!batches.has(key)) {
+        batches.set(key, []);
+      }
+      batches.get(key)!.push(item);
+    }
+    
+    // Process each batch
+    for (const [key, items] of batches) {
+      const [tableName, operation] = key.split(':') as [string, SyncOperation];
+      
       try {
-        await this.executeSyncOperation(item);
-        
-        // Remove from queue on success
-        this.pendingQueue = this.pendingQueue.filter((p) => p.id !== item.id);
-        success++;
-      } catch (error) {
-        // Mark as failed, increment attempts
-        const index = this.pendingQueue.findIndex((p) => p.id === item.id);
-        if (index >= 0) {
-          this.pendingQueue[index].attempts++;
-          this.pendingQueue[index].lastError = error instanceof Error ? error.message : 'Unknown error';
-        }
-        failed++;
-        
-        // If too many attempts, move to end of queue
-        if (this.pendingQueue[index]?.attempts >= 5) {
-          if (__DEV__) {
-            console.warn('Sync item exceeded max attempts:', item);
+        if (operation === 'DELETE') {
+          // Process deletes one by one (can't batch easily)
+          for (const item of items) {
+            try {
+              await this.executeSyncOperation(item);
+              this.pendingQueue = this.pendingQueue.filter((p) => p.id !== item.id);
+              success++;
+            } catch (error) {
+              this.markItemFailed(item, error);
+              failed++;
+            }
           }
+        } else {
+          // Batch INSERT and UPDATE operations using upsert
+          const payloads = items.map((item) => item.payload);
+          
+          const { error } = await supabase.from(tableName).upsert(payloads, {
+            onConflict: 'id',
+            ignoreDuplicates: false,
+          });
+          
+          if (error) {
+            // If batch fails, fall back to individual processing
+            if (__DEV__) {
+              console.warn('Batch upsert failed, falling back to individual:', error.message);
+            }
+            for (const item of items) {
+              try {
+                await this.executeSyncOperation(item);
+                this.pendingQueue = this.pendingQueue.filter((p) => p.id !== item.id);
+                success++;
+              } catch (itemError) {
+                this.markItemFailed(item, itemError);
+                failed++;
+              }
+            }
+          } else {
+            // Batch succeeded - remove all items
+            const itemIds = new Set(items.map((i) => i.id));
+            this.pendingQueue = this.pendingQueue.filter((p) => !itemIds.has(p.id));
+            success += items.length;
+          }
+        }
+      } catch (batchError) {
+        if (__DEV__) {
+          console.error('Batch processing error:', batchError);
+        }
+        // Mark all items in this batch as failed
+        for (const item of items) {
+          this.markItemFailed(item, batchError);
+          failed++;
         }
       }
     }
@@ -238,6 +366,41 @@ class OfflineSyncManager {
     
     return { success, failed };
   }
+  
+  /**
+   * Mark an item as failed and schedule retry with exponential backoff
+   * If max attempts exceeded, move to Dead Letter Queue
+   */
+  private markItemFailed(item: PendingSyncItem, error: unknown) {
+    const index = this.pendingQueue.findIndex((p) => p.id === item.id);
+    if (index >= 0) {
+      this.pendingQueue[index].attempts++;
+      this.pendingQueue[index].lastError = error instanceof Error ? error.message : 'Unknown error';
+      
+      // Check if exceeded max attempts - move to Dead Letter Queue
+      if (this.pendingQueue[index].attempts > OfflineSyncManager.MAX_RETRY_ATTEMPTS) {
+        this.pendingQueue[index].requiresManualRetry = true;
+        if (__DEV__) {
+          console.warn('🚨 Sync item moved to Dead Letter Queue (exceeded max attempts):', {
+            table: item.tableName,
+            recordId: item.recordId,
+            attempts: this.pendingQueue[index].attempts,
+            lastError: this.pendingQueue[index].lastError,
+          });
+        }
+        
+        // Add breadcrumb for monitoring
+        addBreadcrumb('Item moved to DLQ', 'sync', {
+          tableName: item.tableName,
+          recordId: item.recordId,
+          attempts: this.pendingQueue[index].attempts,
+        });
+      } else {
+        // Schedule retry with exponential backoff
+        this.scheduleRetry(this.pendingQueue[index]);
+      }
+    }
+  }
 
   /**
    * Execute a single sync operation
@@ -247,12 +410,20 @@ class OfflineSyncManager {
     
     switch (operation) {
       case 'INSERT': {
-        const { error } = await supabase.from(tableName).insert(payload);
+        // Use upsert to prevent duplicate key errors on retries
+        const { error } = await supabase.from(tableName).upsert(payload, {
+          onConflict: 'id',
+          ignoreDuplicates: false,
+        });
         if (error) throw error;
         break;
       }
       case 'UPDATE': {
-        const { error } = await supabase.from(tableName).update(payload).eq('id', recordId);
+        // Use upsert for updates too - more resilient to race conditions
+        const { error } = await supabase.from(tableName).upsert(payload, {
+          onConflict: 'id',
+          ignoreDuplicates: false,
+        });
         if (error) throw error;
         break;
       }
@@ -262,9 +433,6 @@ class OfflineSyncManager {
         break;
       }
     }
-    
-    // Mark as synced in the table
-    await supabase.from(tableName).update({ synced_at: new Date().toISOString() }).eq('id', recordId);
   }
 
   /**
@@ -329,6 +497,64 @@ class OfflineSyncManager {
   }
 
   /**
+   * Get items in the Dead Letter Queue (require manual retry)
+   */
+  getDeadLetterQueue(): PendingSyncItem[] {
+    return this.pendingQueue.filter(item => item.requiresManualRetry === true);
+  }
+
+  /**
+   * Retry all items in the Dead Letter Queue
+   * Resets their attempts and removes DLQ flag
+   */
+  retryDeadLetterQueue(): void {
+    let retried = 0;
+    this.pendingQueue = this.pendingQueue.map(item => {
+      if (item.requiresManualRetry) {
+        retried++;
+        return {
+          ...item,
+          attempts: 0,
+          requiresManualRetry: false,
+          nextRetryAt: undefined,
+          lastError: undefined,
+        };
+      }
+      return item;
+    });
+    
+    if (retried > 0) {
+      this.savePendingQueue();
+      this.notifyListeners();
+      
+      if (__DEV__) {
+        console.log(`🔄 Retrying ${retried} items from Dead Letter Queue`);
+      }
+      
+      if (this.isOnline) {
+        this.syncPendingItems();
+      }
+    }
+  }
+
+  /**
+   * Remove a specific item from the queue (e.g., if manually resolved)
+   */
+  removeFromQueue(itemId: string): void {
+    this.pendingQueue = this.pendingQueue.filter(item => item.id !== itemId);
+    
+    // Clear any pending timeout
+    const timeout = this.backoffTimeouts.get(itemId);
+    if (timeout) {
+      clearTimeout(timeout);
+      this.backoffTimeouts.delete(itemId);
+    }
+    
+    this.savePendingQueue();
+    this.notifyListeners();
+  }
+
+  /**
    * Cleanup on unmount
    */
   destroy() {
@@ -338,6 +564,9 @@ class OfflineSyncManager {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
     }
+    // Clear all backoff timeouts
+    this.backoffTimeouts.forEach(timeout => clearTimeout(timeout));
+    this.backoffTimeouts.clear();
     this.listeners.clear();
   }
 }

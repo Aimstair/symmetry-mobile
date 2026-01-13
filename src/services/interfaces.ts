@@ -200,6 +200,15 @@ export interface IProgressService {
 // USER SERVICE
 // ============================================================================
 
+export interface FeedbackSubmission {
+  message: string;
+  category?: 'general' | 'bug' | 'feature' | 'support';
+  email?: string;
+  deviceModel?: string;
+  deviceOs?: string;
+  appVersion?: string;
+}
+
 export interface IUserService {
   // Fetch
   getUser(userId: string): Promise<User | null>;
@@ -211,6 +220,9 @@ export interface IUserService {
   updateUser(userId: string, updates: Partial<User>): Promise<User>;
   updateNutritionTargets(userId: string, targets: NutritionTargets): Promise<NutritionTargets>;
   updateEquipment(userId: string, equipment: EquipmentProfile): Promise<EquipmentProfile>;
+  
+  // Feedback
+  submitFeedback(userId: string | null, feedback: FeedbackSubmission): Promise<void>;
 }
 
 // ============================================================================

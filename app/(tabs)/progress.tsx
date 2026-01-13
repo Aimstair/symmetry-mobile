@@ -23,11 +23,13 @@ import {
   ChevronRight,
   Search,
   Filter,
-  Dumbbell
+  Dumbbell,
+  Heart
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
 import { dataService } from '@/services/dataServiceProvider';
+import { healthService, type WeightEntry } from '@/services/HealthService';
 import type { BodyMeasurement, PhysiqueScan, CardioLog, CatalogExercise, MeasurementLog } from '@/types';
 
 const { width } = Dimensions.get('window');
@@ -143,6 +145,7 @@ export default function Progress() {
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [catalogExercises, setCatalogExercises] = useState<CatalogExercise[]>([]);
   const [isLoadingExercises, setIsLoadingExercises] = useState(false);
+  const [isSyncingHealth, setIsSyncingHealth] = useState(false);
   
   const headerAnim = useRef(new Animated.Value(0)).current;
   const contentAnim = useRef(new Animated.Value(0)).current;
@@ -152,9 +155,11 @@ export default function Progress() {
   const measurementLogs = useAppStore((s) => s.measurementLogs);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const cardioLogs = useAppStore((s) => s.cardioLogs);
+  const workoutHistory = useAppStore((s) => s.workoutHistory);
   const settings = useAppStore((s) => s.settings);
   const syncAddMeasurementLog = useAppStore((s) => s.syncAddMeasurementLog);
   const syncAddCardioLog = useAppStore((s) => s.syncAddCardioLog);
+  const syncFetchWorkoutHistory = useAppStore((s) => s.syncFetchWorkoutHistory);
   const isLoading = useAppStore((s) => s.isLoading);
 
   // Load progress data on tab focus
@@ -163,11 +168,14 @@ export default function Progress() {
   // Initial data load on mount (fixes black screen on first load)
   useEffect(() => {
     if (user?.id && !initialLoadDone) {
-      loadProgressData().then(() => {
+      Promise.all([
+        loadProgressData(),
+        syncFetchWorkoutHistory(),
+      ]).then(() => {
         setInitialLoadDone(true);
       });
     }
-  }, [user?.id, initialLoadDone, loadProgressData]);
+  }, [user?.id, initialLoadDone, loadProgressData, syncFetchWorkoutHistory]);
 
   // Load exercises when switching to the Exercises tab
   useEffect(() => {
@@ -190,6 +198,7 @@ export default function Progress() {
   useFocusEffect(
     useCallback(() => {
       loadProgressData();
+      syncFetchWorkoutHistory();
       
       headerAnim.setValue(0);
       contentAnim.setValue(0);
@@ -203,7 +212,7 @@ export default function Progress() {
       return () => {
         animation.stop();
       };
-    }, [headerAnim, contentAnim, loadProgressData])
+    }, [headerAnim, contentAnim, loadProgressData, syncFetchWorkoutHistory])
   );
 
   // Compute derived data using useMemo
@@ -227,6 +236,55 @@ export default function Progress() {
   }, [measurementLogs, settings.unit]);
 
   const symmetryChartData = useMemo(() => transformToSymmetryData(physiqueScans), [physiqueScans]);
+
+  // Strength Progress: Calculate total volume per workout session
+  const strengthProgressData = useMemo(() => {
+    if (!workoutHistory.length) return [];
+    
+    // Sort by date ascending and take last 10 sessions
+    const sortedHistory = [...workoutHistory]
+      .sort((a, b) => new Date(a.startedAt || a.createdAt).getTime() - new Date(b.startedAt || b.createdAt).getTime())
+      .slice(-10);
+    
+    return sortedHistory.map((session) => {
+      // Calculate total volume: sum of (weight × reps) for all sets
+      let totalVolume = 0;
+      
+      if (session.exercises) {
+        session.exercises.forEach((ex: any) => {
+          if (ex.sets) {
+            ex.sets.forEach((set: any) => {
+              const weight = set.weight || 0;
+              const reps = set.reps || 0;
+              totalVolume += weight * reps;
+            });
+          }
+        });
+      }
+      
+      // Convert to user units if needed (assuming data is stored in kg)
+      const volumeDisplay = settings.unit === 'lbs' 
+        ? Math.round(totalVolume * KG_TO_LBS) 
+        : Math.round(totalVolume);
+      
+      const date = new Date(session.startedAt || session.createdAt);
+      
+      return {
+        value: volumeDisplay,
+        label: date.getDate().toString(),
+        date: formatDate(date),
+        sessionName: session.name || 'Workout',
+      };
+    });
+  }, [workoutHistory, settings.unit]);
+
+  // Calculate volume trend
+  const volumeTrend = useMemo(() => {
+    if (strengthProgressData.length < 2) return 0;
+    const recent = strengthProgressData.slice(-3).reduce((sum, d) => sum + d.value, 0) / Math.min(3, strengthProgressData.length);
+    const earlier = strengthProgressData.slice(0, 3).reduce((sum, d) => sum + d.value, 0) / Math.min(3, strengthProgressData.length);
+    return recent - earlier;
+  }, [strengthProgressData]);
 
   const measurementsComparison = useMemo(() => {
     const logsWithTape = measurementLogs
@@ -490,6 +548,87 @@ export default function Progress() {
                       <Scale size={40} color="#71717A" style={{ opacity: 0.5 }} />
                       <Text className="text-muted-foreground mt-3">No weight data yet</Text>
                       <Text className="text-xs text-muted-foreground mt-1">Log your weight to see trends</Text>
+                    </View>
+                  )}
+                </GlassCard>
+              </View>
+
+              {/* Strength Progress Chart */}
+              <View>
+                <View className="flex-row items-center justify-between mb-3">
+                  <View className="flex-row items-center gap-2">
+                    <Dumbbell size={20} color="#8B5CF6" />
+                    <Text className="text-lg font-semibold text-foreground">Strength Progress</Text>
+                  </View>
+                  {volumeTrend !== 0 && (
+                    <Text className={cn('text-sm', volumeTrend > 0 ? 'text-success' : 'text-destructive')}>
+                      {volumeTrend > 0 ? '+' : ''}{Math.round(volumeTrend).toLocaleString()} {settings.unit}
+                    </Text>
+                  )}
+                </View>
+                <GlassCard className="p-0 overflow-hidden pb-4">
+                  {strengthProgressData.length > 0 ? (
+                    <View className="items-center justify-center pt-4">
+                      <LineChart
+                        data={strengthProgressData}
+                        curved
+                        areaChart
+                        height={180}
+                        width={chartWidth}
+                        spacing={30}
+                        initialSpacing={10}
+                        color="#8B5CF6"
+                        thickness={3}
+                        startFillColor="#8B5CF6"
+                        endFillColor="#8B5CF6"
+                        startOpacity={0.3}
+                        endOpacity={0.05}
+                        dataPointsColor="#8B5CF6"
+                        dataPointsRadius={4}
+                        hideDataPoints={false}
+                        yAxisColor="#27272A"
+                        xAxisColor="#27272A"
+                        yAxisTextStyle={{ color: '#A1A1AA', fontSize: 10 }}
+                        xAxisLabelTextStyle={{ color: '#A1A1AA', fontSize: 9 }}
+                        rulesType="solid"
+                        rulesColor="#27272A"
+                        noOfSections={4}
+                        backgroundColor="transparent"
+                        formatYLabel={(value) => {
+                          const num = parseInt(value);
+                          if (num >= 1000) return `${(num / 1000).toFixed(1)}k`;
+                          return value;
+                        }}
+                        pointerConfig={{
+                          pointerStripHeight: 160,
+                          pointerStripColor: '#8B5CF6',
+                          pointerStripWidth: 2,
+                          pointerColor: '#8B5CF6',
+                          radius: 6,
+                          pointerLabelWidth: 120,
+                          pointerLabelHeight: 90,
+                          activatePointersOnLongPress: true,
+                          autoAdjustPointerLabelPosition: false,
+                          pointerLabelComponent: (items: any) => {
+                            return (
+                              <View className="bg-card border border-border rounded-lg px-3 py-2">
+                                <Text className="text-xs text-[#8B5CF6] font-bold">
+                                  {items[0].value.toLocaleString()} {settings.unit}
+                                </Text>
+                                <Text className="text-xs text-muted-foreground">{items[0].date}</Text>
+                                <Text className="text-xs text-muted-foreground">{items[0].sessionName}</Text>
+                              </View>
+                            );
+                          },
+                        }}
+                      />
+                      <Text className="text-xs text-muted-foreground mt-2">Total Volume per Session</Text>
+                    </View>
+                  ) : (
+                    <View className="items-center justify-center py-12">
+                      <Dumbbell size={40} color="#71717A" style={{ opacity: 0.5 }} />
+                      <Text className="text-muted-foreground mt-3">No workout data yet</Text>
+                      <Text className="text-xs text-muted-foreground mt-1">Complete workouts to track strength progress</Text>
                     </View>
                   )}
                 </GlassCard>
@@ -761,10 +900,63 @@ export default function Progress() {
                     <Scale size={20} color="#31D5E3" />
                     <Text className="text-lg font-semibold text-foreground">Log Weight</Text>
                   </View>
-                  <Button size="sm" variant="outline" onPress={() => setShowLogWeightModal(true)}>
-                    <Plus size={16} color="#31D5E3" />
-                    <Text className="text-foreground ml-1">Log</Text>
-                  </Button>
+                  <View className="flex-row items-center gap-2">
+                    {healthService.isAvailable() && (
+                      <Button 
+                        size="sm" 
+                        variant="outline" 
+                        onPress={async () => {
+                          if (!user) return;
+                          setIsSyncingHealth(true);
+                          try {
+                            const { entries, result } = await healthService.syncBodyMetrics();
+                            if (result.success && entries.length > 0) {
+                              // Import each new weight entry
+                              let imported = 0;
+                              for (const entry of entries) {
+                                // Check if we already have this date
+                                const existingDate = measurementLogs.find(
+                                  m => new Date(m.date).toDateString() === entry.date.toDateString()
+                                );
+                                if (!existingDate) {
+                                  await syncAddMeasurementLog({
+                                    id: `health_${entry.date.getTime()}`,
+                                    userId: user.id,
+                                    date: entry.date,
+                                    createdAt: new Date(),
+                                    weightKg: entry.weightKg,
+                                  });
+                                  imported++;
+                                }
+                              }
+                              Alert.alert(
+                                'Sync Complete',
+                                imported > 0 
+                                  ? `Imported ${imported} new weight entries from ${healthService.getHealthAppName()}`
+                                  : 'No new entries to import'
+                              );
+                            } else {
+                              Alert.alert('Sync Result', result.message);
+                            }
+                          } catch (error) {
+                            Alert.alert('Sync Failed', 'Could not sync with health app');
+                          } finally {
+                            setIsSyncingHealth(false);
+                          }
+                        }}
+                        disabled={isSyncingHealth}
+                      >
+                        <Heart size={16} color="#EC4899" />
+                        <Text className="text-foreground ml-1">
+                          {isSyncingHealth ? 'Syncing...' : 'Sync Health'}
+                        </Text>
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onPress={() => setShowLogWeightModal(true)}>
+                      <Plus size={16} color="#31D5E3" />
+                      <Text className="text-foreground ml-1">Log</Text>
+                    </Button>
+                  </View>
                 </View>
                 <GlassCard className="mt-4">
                     

@@ -4,6 +4,8 @@ import { storageAdapter } from '@/lib/storage';
 import { dataService } from '@/services/dataServiceProvider';
 import { isUsingCloudService } from '@/services/dataServiceProvider';
 import { localService } from '@/services/LocalService';
+import { subscriptionService } from '@/services/SubscriptionService';
+import { supabase } from '@/lib/supabase';
 import type {
   User,
   NutritionTargets,
@@ -69,6 +71,10 @@ interface AppState {
   // Guest Mode
   isGuest: boolean;
 
+  // Subscription
+  isPro: boolean;
+  nextScanDate: string | null; // Cached next scan date for instant UI updates
+
   // Workout Data
   workoutPlans: WorkoutPlan[];
   activeWorkout: ActiveWorkoutState;
@@ -92,8 +98,13 @@ interface AppState {
   // Actions - User
   setUser: (user: User) => void;
   updateUser: (updates: Partial<User>) => void;
+  incrementWorkoutsCompleted: () => number; // Returns the new count
   setNutritionTargets: (targets: NutritionTargets) => void;
   setEquipment: (equipment: EquipmentProfile) => void;
+  setIsPro: (isPro: boolean) => void;
+  setNextScanDate: (date: string | null) => void;
+  fetchSubscriptionStatus: () => Promise<void>;
+  refreshNextScanDate: () => Promise<void>;
 
   // Actions - Workout
   setWorkoutPlans: (plans: WorkoutPlan[]) => void;
@@ -211,6 +222,8 @@ export const useAppStore = create<AppState>()(
       nutritionTargets: null,
       equipment: null,
       isGuest: true,
+      isPro: false,
+      nextScanDate: null,
       workoutPlans: [],
       activeWorkout: initialActiveWorkout,
       workoutHistory: [],
@@ -226,13 +239,80 @@ export const useAppStore = create<AppState>()(
       setLoading: (isLoading, message) => set({ isLoading, loadingMessage: message || null }),
 
       // User Actions
-      setUser: (user) => set({ user }),
+      setUser: (user) => {
+        set({ user });
+        // Fetch subscription status and next scan date when user is set
+        if (user?.id) {
+          get().fetchSubscriptionStatus();
+          get().refreshNextScanDate();
+        }
+      },
       updateUser: (updates) =>
         set((state) => ({
           user: state.user ? { ...state.user, ...updates } : null,
         })),
+      incrementWorkoutsCompleted: () => {
+        const state = get();
+        const currentCount = state.user?.workoutsCompleted ?? 0;
+        const newCount = currentCount + 1;
+        
+        if (state.user) {
+          set({
+            user: { ...state.user, workoutsCompleted: newCount },
+          });
+        }
+        
+        return newCount;
+      },
       setNutritionTargets: (targets) => set({ nutritionTargets: targets }),
       setEquipment: (equipment) => set({ equipment }),
+      setIsPro: (isPro) => set({ isPro }),
+      setNextScanDate: (date) => set({ nextScanDate: date }),
+      
+      /**
+       * Fetch the next scan date from the server and cache it locally
+       * This enables instant UI updates without network calls
+       */
+      refreshNextScanDate: async () => {
+        const user = get().user;
+        if (!user?.id) return;
+        
+        try {
+          const { data, error } = await supabase.rpc('get_next_scan_date', {
+            p_user_id: user.id,
+          });
+          
+          if (!error && data) {
+            set({ nextScanDate: data });
+            if (__DEV__) {
+              console.log('📅 Next scan date cached:', data);
+            }
+          }
+        } catch (error) {
+          if (__DEV__) {
+            console.error('Failed to refresh next scan date:', error);
+          }
+        }
+      },
+      
+      fetchSubscriptionStatus: async () => {
+        try {
+          const user = get().user;
+          if (user?.id) {
+            await subscriptionService.initialize(user.id);
+          }
+          const isPro = await subscriptionService.isProUser();
+          set({ isPro });
+          if (__DEV__) {
+            console.log('📦 Subscription status fetched:', isPro ? 'Pro' : 'Free');
+          }
+        } catch (error) {
+          if (__DEV__) {
+            console.error('Failed to fetch subscription status:', error);
+          }
+          set({ isPro: false });
+        }
+      },
 
       // Workout Actions
       setWorkoutPlans: (plans) => set({ workoutPlans: plans }),
@@ -467,6 +547,8 @@ export const useAppStore = create<AppState>()(
       completeOnboarding: () =>
         set((state) => ({
           onboarding: { ...state.onboarding, completed: true },
+          // Initialize workoutsCompleted if user exists
+          user: state.user ? { ...state.user, workoutsCompleted: state.user.workoutsCompleted ?? 0 } : state.user,
         })),
       resetOnboarding: () => set({ onboarding: initialOnboarding }),
 

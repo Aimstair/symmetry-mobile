@@ -172,7 +172,8 @@ export default function Onboarding() {
           console.log('🎉 Onboarding completed for guest:', guestId);
         }
 
-        router.replace('/(tabs)');
+        // Navigate to paywall after onboarding
+        router.push('/paywall?onboarding=true');
       } catch (error: any) {
         console.error('❌ Error saving user profile:', error);
         Alert.alert(

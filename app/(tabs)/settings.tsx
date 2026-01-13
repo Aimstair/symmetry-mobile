@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated, Alert } from 'react-native';
+import { View, Text, ScrollView, Pressable, Animated, Alert, Linking, Platform, TextInput, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import * as StoreReview from 'expo-store-review';
+import * as Device from 'expo-device';
+import * as Application from 'expo-application';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,7 +13,10 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useAppStore } from '@/store/useAppStore';
 import { supabase } from '@/lib/supabase';
+import { notificationService } from '@/services/NotificationService';
 import { calculateNutritionTargets } from '@/utils/nutrition';
+import { dataService } from '@/services/dataServiceProvider';
+import { exportUserData } from '@/services/ExportService';
 import { 
   Dialog,
   DialogContent,
@@ -33,6 +39,7 @@ import {
   Bell, 
   Crown, 
   Download,
+  Upload,
   Trash2,
   ChevronRight,
   Minus,
@@ -44,7 +51,13 @@ import {
   LogOut,
   Edit3,
   Save,
-  Cloud
+  Cloud,
+  Star,
+  Clock,
+  FileText,
+  Shield,
+  MessageSquare,
+  Send
 } from 'lucide-react-native';
 import { cn, convert } from '@/lib/utils';
 import type { User as UserType } from '@/types';
@@ -242,19 +255,171 @@ export default function Settings() {
   const [showBlacklist, setShowBlacklist] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteInput, setDeleteInput] = useState('');
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  // Export state
+  const [isExporting, setIsExporting] = useState(false);
+
+  // Feedback modal state
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackCategory, setFeedbackCategory] = useState<'general' | 'bug' | 'feature' | 'support'>('general');
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+
+  // Workout reminder time state
+  const [reminderHour, setReminderHour] = useState(settings.workoutReminderHour ?? 18);
+  const [reminderMinute, setReminderMinute] = useState(settings.workoutReminderMinute ?? 0);
 
   // Notification toggles
   const workoutReminders = settings.notifications.workoutReminders;
   const restTimerSound = settings.notifications.restTimerSound;
   const progressUpdates = settings.notifications.progressUpdates;
 
-  const handleNotificationChange = (key: 'workoutReminders' | 'restTimerSound' | 'progressUpdates', value: boolean) => {
+  const handleNotificationChange = async (key: 'workoutReminders' | 'restTimerSound' | 'progressUpdates', value: boolean) => {
     updateSettings({
       notifications: {
         ...settings.notifications,
         [key]: value,
       },
     });
+
+    // Handle workout reminder scheduling
+    if (key === 'workoutReminders') {
+      if (value) {
+        // Schedule the reminder
+        await notificationService.scheduleWorkoutReminder(reminderHour, reminderMinute);
+      } else {
+        // Cancel all workout reminders
+        await notificationService.cancelWorkoutReminders();
+      }
+    }
+  };
+
+  // Handle reminder time change
+  const handleReminderTimeChange = async (hour: number, minute: number) => {
+    setReminderHour(hour);
+    setReminderMinute(minute);
+    
+    // Save to settings
+    updateSettings({
+      workoutReminderHour: hour,
+      workoutReminderMinute: minute,
+    });
+
+    // Reschedule if reminders are enabled
+    if (workoutReminders) {
+      await notificationService.scheduleWorkoutReminder(hour, minute);
+    }
+  };
+
+  // Export data handler
+  const handleExportData = async () => {
+    setIsExporting(true);
+    try {
+      await exportUserData();
+    } catch (error) {
+      console.error('Failed to export data:', error);
+      Alert.alert(
+        'Export Failed',
+        error instanceof Error ? error.message : 'Unable to export your data. Please try again.'
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Rate app handler
+  const handleRateApp = async () => {
+    if (await StoreReview.hasAction()) {
+      try {
+        await StoreReview.requestReview();
+      } catch (error) {
+        // Fallback to store page if in-app review fails
+        const storeUrl = Platform.OS === 'ios'
+          ? 'https://apps.apple.com/app/symmetry-fitness/id1234567890'
+          : 'https://play.google.com/store/apps/details?id=com.symmetry.fitness';
+        Linking.openURL(storeUrl);
+      }
+    }
+  };
+
+  // Delete account handler
+  const handleDeleteAccount = async () => {
+    if (deleteInput !== 'DELETE') return;
+    
+    setIsDeletingAccount(true);
+    try {
+      // Call the secure RPC function to delete user account
+      const { error } = await supabase.rpc('delete_user_account');
+      
+      if (error) {
+        console.error('Failed to delete account:', error);
+        Alert.alert('Error', 'Failed to delete account. Please try again or contact support.');
+        return;
+      }
+
+      // Cancel all notifications
+      await notificationService.cancelAllNotifications();
+      
+      // Sign out
+      await supabase.auth.signOut();
+      resetStore();
+      
+      Alert.alert(
+        'Account Deleted',
+        'Your account and all associated data have been permanently deleted.',
+        [{ text: 'OK', onPress: () => router.replace('/onboarding') }]
+      );
+    } catch (error) {
+      console.error('Error deleting account:', error);
+      Alert.alert('Error', 'Something went wrong. Please try again.');
+    } finally {
+      setIsDeletingAccount(false);
+      setShowDeleteConfirm(false);
+      setDeleteInput('');
+    }
+  };
+
+  // Handle feedback submission
+  const handleSubmitFeedback = async () => {
+    if (!feedbackMessage.trim()) {
+      Alert.alert('Error', 'Please enter your feedback message.');
+      return;
+    }
+
+    setIsSubmittingFeedback(true);
+    try {
+      await dataService.user.submitFeedback(user?.id || null, {
+        message: feedbackMessage.trim(),
+        category: feedbackCategory,
+        email: user?.email,
+        deviceModel: Device.modelName || undefined,
+        deviceOs: `${Platform.OS} ${Device.osVersion || ''}`.trim(),
+        appVersion: Application.nativeApplicationVersion || undefined,
+      });
+
+      Alert.alert(
+        'Thank You! 🙏',
+        'Your feedback has been submitted. We appreciate you helping us improve Symmetry!',
+        [{ text: 'OK', onPress: () => setShowFeedbackModal(false) }]
+      );
+      setFeedbackMessage('');
+      setFeedbackCategory('general');
+    } catch (error) {
+      console.error('Failed to submit feedback:', error);
+      Alert.alert('Error', 'Failed to submit feedback. Please try again later.');
+    } finally {
+      setIsSubmittingFeedback(false);
+    }
+  };
+
+  // Legal links
+  const openPrivacyPolicy = () => {
+    Linking.openURL('https://symmetry.app/privacy');
+  };
+
+  const openTermsOfService = () => {
+    Linking.openURL('https://symmetry.app/terms');
   };
 
   // Blacklist from store
@@ -572,6 +737,50 @@ export default function Settings() {
                   onValueChange={(value) => handleNotificationChange('workoutReminders', value)}
                 />
               </View>
+              
+              {/* Reminder Time Picker - only show when workout reminders are enabled */}
+              {workoutReminders && (
+                <View className="flex-row items-center justify-between pl-8">
+                  <View className="flex-row items-center gap-2">
+                    <Clock size={16} color="#71717A" />
+                    <Text className="text-muted-foreground text-sm">Reminder Time</Text>
+                  </View>
+                  <View className="flex-row items-center gap-2">
+                    <Select 
+                      value={reminderHour.toString()} 
+                      onValueChange={(v) => handleReminderTimeChange(parseInt(v), reminderMinute)}
+                    >
+                      <SelectTrigger className="w-16 h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Array.from({ length: 24 }, (_, i) => (
+                          <SelectItem key={i} value={i.toString()}>
+                            {i.toString().padStart(2, '0')}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Text className="text-muted-foreground">:</Text>
+                    <Select 
+                      value={reminderMinute.toString()} 
+                      onValueChange={(v) => handleReminderTimeChange(reminderHour, parseInt(v))}
+                    >
+                      <SelectTrigger className="w-16 h-8">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[0, 15, 30, 45].map((m) => (
+                          <SelectItem key={m} value={m.toString()}>
+                            {m.toString().padStart(2, '0')}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </View>
+                </View>
+              )}
+              
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center gap-3 flex-1">
                   <Bell size={20} color="#31D5E3" />
@@ -640,6 +849,62 @@ export default function Settings() {
               App Management
             </Text>
             <View className="gap-2">
+              {/* Send Feedback */}
+              <Pressable
+                onPress={() => setShowFeedbackModal(true)}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <MessageSquare size={20} color="#31D5E3" />
+                    <View>
+                      <Text className="text-foreground">Send Feedback</Text>
+                      <Text className="text-xs text-muted-foreground">Help us improve the app</Text>
+                    </View>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
+                </GlassCard>
+              </Pressable>
+
+              {/* Rate App */}
+              <Pressable
+                onPress={handleRateApp}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <Star size={20} color="#F59E0B" />
+                    <View>
+                      <Text className="text-foreground">Rate Symmetry</Text>
+                      <Text className="text-xs text-muted-foreground">Share your feedback</Text>
+                    </View>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
+                </GlassCard>
+              </Pressable>
+
+              {/* Export Data */}
+              <Pressable
+                onPress={handleExportData}
+                disabled={isExporting}
+                style={({ pressed }) => ({ opacity: pressed || isExporting ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <Upload size={20} color="#31D5E3" />
+                    <View>
+                      <Text className="text-foreground">Export Data</Text>
+                      <Text className="text-xs text-muted-foreground">Download your data as JSON</Text>
+                    </View>
+                  </View>
+                  {isExporting ? (
+                    <ActivityIndicator size="small" color="#31D5E3" />
+                  ) : (
+                    <ChevronRight size={20} color="#71717A" />
+                  )}
+                </GlassCard>
+              </Pressable>
+
               <GlassCard className="flex-row items-center justify-between">
                 <View className="flex-row items-center gap-3 flex-1">
                   <Download size={20} color="#31D5E3" />
@@ -681,6 +946,40 @@ export default function Settings() {
                     </Text>
                   </View>
                   <ChevronRight size={20} color="#EF4444" />
+                </GlassCard>
+              </Pressable>
+            </View>
+          </Animated.View>
+
+          {/* Legal Section */}
+          <Animated.View style={createAnimStyle(section7Anim)} className="mb-6">
+            <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+              Legal
+            </Text>
+            <View className="gap-2">
+              <Pressable
+                onPress={openPrivacyPolicy}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <Shield size={20} color="#71717A" />
+                    <Text className="text-foreground">Privacy Policy</Text>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
+                </GlassCard>
+              </Pressable>
+
+              <Pressable
+                onPress={openTermsOfService}
+                style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+              >
+                <GlassCard className="flex-row items-center justify-between">
+                  <View className="flex-row items-center gap-3">
+                    <FileText size={20} color="#71717A" />
+                    <Text className="text-foreground">Terms of Service</Text>
+                  </View>
+                  <ChevronRight size={20} color="#71717A" />
                 </GlassCard>
               </Pressable>
             </View>
@@ -1101,21 +1400,136 @@ export default function Settings() {
           <DialogFooter>
             <Button 
               variant="outline" 
-              onPress={() => setShowDeleteConfirm(false)}
+              onPress={() => {
+                setShowDeleteConfirm(false);
+                setDeleteInput('');
+              }}
               className="flex-1"
+              disabled={isDeletingAccount}
             >
               <Text className="text-foreground">Cancel</Text>
             </Button>
             <Button 
               variant="destructive" 
-              disabled={deleteInput !== 'DELETE'}
-              onPress={() => {
-                // Handle delete
-                setShowDeleteConfirm(false);
-              }}
+              disabled={deleteInput !== 'DELETE' || isDeletingAccount}
+              onPress={handleDeleteAccount}
               className="flex-1"
             >
-              <Text className="text-destructive-foreground">Delete Account</Text>
+              <Text className="text-destructive-foreground">
+                {isDeletingAccount ? 'Deleting...' : 'Delete Account'}
+              </Text>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Feedback Modal */}
+      <Dialog open={showFeedbackModal} onOpenChange={setShowFeedbackModal}>
+        <DialogContent>
+          <DialogHeader onClose={() => setShowFeedbackModal(false)}>
+            <View className="flex-row items-center gap-2">
+              <MessageSquare size={20} color="#31D5E3" />
+              <DialogTitle>Send Feedback</DialogTitle>
+            </View>
+            <DialogDescription>
+              Help us improve Symmetry by sharing your thoughts
+            </DialogDescription>
+          </DialogHeader>
+          
+          <View className="gap-4 py-4">
+            {/* Category Selection */}
+            <View>
+              <Label className="mb-2">Category</Label>
+              <View className="flex-row gap-2 flex-wrap">
+                {[
+                  { value: 'general', label: '💬 General' },
+                  { value: 'bug', label: '🐛 Bug Report' },
+                  { value: 'feature', label: '✨ Feature' },
+                  { value: 'support', label: '🆘 Support' },
+                ].map((cat) => (
+                  <Pressable
+                    key={cat.value}
+                    onPress={() => setFeedbackCategory(cat.value as typeof feedbackCategory)}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+                  >
+                    <View className={cn(
+                      "px-3 py-2 rounded-lg border",
+                      feedbackCategory === cat.value 
+                        ? "bg-primary/20 border-primary" 
+                        : "bg-muted/30 border-border"
+                    )}>
+                      <Text className={cn(
+                        "text-sm",
+                        feedbackCategory === cat.value ? "text-primary" : "text-muted-foreground"
+                      )}>
+                        {cat.label}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+
+            {/* Feedback Message */}
+            <View>
+              <Label className="mb-2">Your Feedback</Label>
+              <TextInput
+                value={feedbackMessage}
+                onChangeText={setFeedbackMessage}
+                placeholder="Tell us what's on your mind..."
+                placeholderTextColor="#71717A"
+                multiline
+                numberOfLines={5}
+                textAlignVertical="top"
+                style={{
+                  backgroundColor: 'rgba(255,255,255,0.05)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.1)',
+                  borderRadius: 12,
+                  padding: 12,
+                  color: '#FAFAFA',
+                  minHeight: 120,
+                  fontSize: 14,
+                }}
+              />
+            </View>
+
+            {/* User email display */}
+            {user?.email && (
+              <View className="bg-muted/30 rounded-lg p-3">
+                <Text className="text-xs text-muted-foreground">
+                  Feedback will be associated with: <Text className="text-foreground">{user.email}</Text>
+                </Text>
+              </View>
+            )}
+          </View>
+
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onPress={() => {
+                setShowFeedbackModal(false);
+                setFeedbackMessage('');
+                setFeedbackCategory('general');
+              }}
+              className="flex-1"
+              disabled={isSubmittingFeedback}
+            >
+              <Text className="text-foreground">Cancel</Text>
+            </Button>
+            <Button 
+              onPress={handleSubmitFeedback}
+              className="flex-1 bg-primary"
+              disabled={isSubmittingFeedback || !feedbackMessage.trim()}
+            >
+              {isSubmittingFeedback ? (
+                <ActivityIndicator size="small" color="#09090B" />
+              ) : (
+                <View className="flex-row items-center gap-2">
+                  <Send size={16} color="#09090B" />
+                  <Text className="text-primary-foreground font-semibold">Send</Text>
+                </View>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

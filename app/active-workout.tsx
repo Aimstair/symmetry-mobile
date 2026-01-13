@@ -3,7 +3,11 @@ import { View, Text, ScrollView, Pressable, TextInput, Alert, Animated, LayoutAn
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle } from 'react-native-svg';
 import { useRouter, useFocusEffect } from 'expo-router';
+import { useKeepAwake } from 'expo-keep-awake';
+import * as Haptics from 'expo-haptics';
+import * as StoreReview from 'expo-store-review';
 import { useAppStore } from '@/store/useAppStore';
+import { healthService } from '@/services/HealthService';
 import { getCurrentWeekCalendar, normalizeDayName } from '@/utils/workoutCalendar';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
@@ -17,6 +21,7 @@ import {
 } from '@/components/ui/modal';
 import { ExerciseDetailSheet } from '@/components/ui/workout/ExerciseDetailSheet';
 import { AddExerciseModal } from '@/components/ui/workout/AddExerciseModal';
+import { ShareModal } from '@/components/ui/workout/ShareModal';
 import { 
   ChevronLeft, 
   Timer, 
@@ -30,6 +35,7 @@ import {
   ChevronRight,
   Trophy,
   Trash2,
+  Share2,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import type { PlanExercise, WorkoutDay, CatalogExercise } from '@/types';
@@ -79,6 +85,7 @@ const ElapsedTimer = ({ startTime }: { startTime: Date | string | null }) => {
 };
 
 // Isolated rest timer component with entrance/exit animations
+// Uses "Delta" method for drift-proof timing - guarantees accurate completion even if app lags/backgrounds
 const RestTimerDisplay = ({ 
   restTimer, 
   onStop, 
@@ -91,6 +98,9 @@ const RestTimerDisplay = ({
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
   const [isVisible, setIsVisible] = useState(false);
+  
+  // ✅ DRIFT-PROOF: Store the exact timestamp when timer should complete
+  const endTimeRef = useRef<number | null>(null);
 
   // Handle entrance/exit animations
   useEffect(() => {
@@ -126,20 +136,39 @@ const RestTimerDisplay = ({
     }
   }, [restTimer.isRunning, fadeAnim, scaleAnim]);
 
+  // ✅ DRIFT-PROOF TIMER: Uses delta-time method instead of counting intervals
   useEffect(() => {
-    if (!restTimer.isRunning) return;
+    if (!restTimer.isRunning) {
+      endTimeRef.current = null;
+      return;
+    }
 
+    // Calculate the exact moment when timer should complete
+    // This only happens once when timer starts running
+    if (endTimeRef.current === null) {
+      const remainingSeconds = restTimer.targetSeconds - restTimer.elapsedSeconds;
+      endTimeRef.current = Date.now() + remainingSeconds * 1000;
+    }
+
+    // Check 4x per second for snappy UI updates
     const interval = setInterval(() => {
-      const newElapsed = restTimer.elapsedSeconds + 1;
-      if (newElapsed >= restTimer.targetSeconds) {
+      const now = Date.now();
+      const msRemaining = endTimeRef.current! - now;
+      const secondsRemaining = Math.ceil(msRemaining / 1000);
+      const newElapsed = restTimer.targetSeconds - secondsRemaining;
+
+      if (msRemaining <= 0) {
+        // Timer complete - this is accurate even if app was backgrounded
         onStop();
+        endTimeRef.current = null;
       } else {
-        onUpdate(newElapsed);
+        // Update elapsed - this "catches up" instantly if frames were dropped
+        onUpdate(Math.max(0, newElapsed));
       }
-    }, 1000);
+    }, 250);
 
     return () => clearInterval(interval);
-  }, [restTimer.isRunning, restTimer.elapsedSeconds, restTimer.targetSeconds, onStop, onUpdate]);
+  }, [restTimer.isRunning, restTimer.targetSeconds, onStop, onUpdate]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -226,6 +255,7 @@ interface SetData {
   id: number;
   weight: string;
   reps: string;
+  rpe: string; // Rate of Perceived Exertion (1-10)
   completed: boolean;
   isWarmup: boolean;
   tags: string[];
@@ -265,6 +295,7 @@ function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
         id: i + 1,
         weight: '',
         reps: '',
+        rpe: '',
         completed: false,
         isWarmup: false,
         tags: [],
@@ -277,6 +308,9 @@ function convertToSessionExercises(exercises: PlanExercise[]): ExerciseData[] {
 
 export default function ActiveWorkout() {
   const router = useRouter();
+  
+  // Keep screen awake during workout
+  useKeepAwake();
   
   // Store connections
   const {
@@ -297,6 +331,7 @@ export default function ActiveWorkout() {
     syncEnsureTodaySchedule,
     syncFetchWorkoutHistory,
     updateActiveWorkout,
+    incrementWorkoutsCompleted,
   } = useAppStore();
 
   // Local state
@@ -311,6 +346,7 @@ export default function ActiveWorkout() {
   const [showHistory, setShowHistory] = useState(false);
   const [showCompletionModal, setShowCompletionModal] = useState(false);
   const [showAddExerciseModal, setShowAddExerciseModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   
   // Animation refs for smooth entrance
   const exerciseAnimations = useRef<Map<string, Animated.Value>>(new Map());
@@ -412,6 +448,7 @@ export default function ActiveWorkout() {
               id: idx + 1,
               weight: saved.weight ? String(saved.weight) : '',
               reps: saved.reps ? String(saved.reps) : '',
+              rpe: saved.rpe ? String(saved.rpe) : '',
               completed: saved.isCompleted || false,
               isWarmup: saved.isWarmup || false,
               tags: [],
@@ -532,8 +569,66 @@ export default function ActiveWorkout() {
       await syncFetchWorkoutHistory();
       console.log('✅ Workout history refreshed');
 
+      // Export workout to Health (Apple Health / Health Connect)
+      if (healthService.isAvailable()) {
+        try {
+          const currentUser = useAppStore.getState().user;
+          const durationSeconds = activeWorkout.startTime 
+            ? Math.floor((Date.now() - new Date(activeWorkout.startTime).getTime()) / 1000)
+            : 0;
+          
+          const healthResult = await healthService.saveWorkout({
+            id: sessionId || `session_${Date.now()}`,
+            userId: currentUser?.id || '',
+            name: currentDay?.name || 'Workout Session',
+            startedAt: activeWorkout.startTime ? new Date(activeWorkout.startTime) : new Date(),
+            endedAt: new Date(),
+            durationSeconds,
+            warmupMode: activeWorkout.warmupMode,
+            deloadMode: activeWorkout.deloadMode,
+            exercises: [],
+            createdAt: new Date(),
+          });
+          
+          if (__DEV__) {
+            console.log('🍎 Health sync result:', healthResult.message);
+          }
+        } catch (healthError) {
+          // Non-critical - don't block workout completion
+          console.warn('Health sync failed (non-critical):', healthError);
+        }
+      }
+
       // End workout in store
       endWorkout();
+      
+      // Increment workouts completed counter and check for review trigger
+      const workoutsCompleted = incrementWorkoutsCompleted();
+      
+      // Smart Review Trigger: Ask for review on 3rd workout or every 50th workout
+      // This targets active, happy users who have formed a habit
+      if (workoutsCompleted === 3 || (workoutsCompleted > 0 && workoutsCompleted % 50 === 0)) {
+        try {
+          const isAvailable = await StoreReview.isAvailableAsync();
+          if (isAvailable) {
+            // Small delay to let the completion modal show first
+            setTimeout(async () => {
+              await StoreReview.requestReview();
+              if (__DEV__) {
+                console.log('⭐ Store review requested at workout #', workoutsCompleted);
+              }
+            }, 1500);
+          }
+        } catch (reviewError) {
+          // Non-critical - don't block on review errors
+          if (__DEV__) {
+            console.warn('Store review request failed:', reviewError);
+          }
+        }
+      }
+      
+      // Trigger success haptic feedback
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       
       // Show completion modal
       setShowCompletionModal(true);
@@ -570,6 +665,7 @@ export default function ActiveWorkout() {
           id: newSetId,
           weight: lastSet?.weight || '',
           reps: lastSet?.reps || '',
+          rpe: '',
           completed: false,
           isWarmup: false,
           tags: [],
@@ -608,6 +704,11 @@ export default function ActiveWorkout() {
       }
     }
     
+    // Trigger haptic feedback on set completion
+    if (!set?.completed) {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    
     LayoutAnimation.configureNext(springConfig);
     const updatedExercises = exercises.map((ex) =>
       ex.id === exerciseId
@@ -623,7 +724,7 @@ export default function ActiveWorkout() {
     }
   };
 
-  const handleInputChange = (exerciseId: string, setId: number, field: 'weight' | 'reps', value: string) => {
+  const handleInputChange = (exerciseId: string, setId: number, field: 'weight' | 'reps' | 'rpe', value: string) => {
     const updatedExercises = exercises.map((ex) =>
       ex.id === exerciseId
         ? { ...ex, sets: ex.sets.map((s) => s.id === setId ? { ...s, [field]: value } : s) }
@@ -639,7 +740,7 @@ export default function ActiveWorkout() {
     setExercises((prev) =>
       prev.map((ex) =>
         ex.id === exerciseId
-          ? { ...ex, name: newName, id: newExerciseId }
+          ? { ...ex, name: newName, catalogExerciseId: newExerciseId } // FIXED: Updates catalog ID, keeps Session ID
           : ex
       )
     );
@@ -647,7 +748,6 @@ export default function ActiveWorkout() {
     // Sync to cloud if we have plan context
     if (currentPlan && currentDay) {
       try {
-        // Find the original exercise in the plan to get its actual ID
         const originalExercise = currentDay.exercises.find(e => e.id === exerciseId);
         if (originalExercise) {
           await syncSwapExerciseToCloud(
@@ -659,7 +759,6 @@ export default function ActiveWorkout() {
         }
       } catch (error) {
         console.error('Failed to sync exercise swap:', error);
-        // The local state is already updated, so user can continue
       }
     }
   };
@@ -902,11 +1001,12 @@ export default function ActiveWorkout() {
 
                   {/* Sets Table Header */}
                   <View className="flex-row px-4 py-2 bg-muted/30 border-b border-border/30">
-                    <Text className="w-[12%] text-xs text-muted-foreground font-medium">SET</Text>
-                    <Text className="w-[25%] text-xs text-muted-foreground font-medium">PREV</Text>
-                    <Text className="w-[18%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
-                    <Text className="w-[18%] text-xs text-muted-foreground font-medium">REPS</Text>
-                    <Text className="w-[15%] text-xs text-muted-foreground font-medium text-center">✓</Text>
+                    <Text className="w-[10%] text-xs text-muted-foreground font-medium">SET</Text>
+                    <Text className="w-[20%] text-xs text-muted-foreground font-medium">PREV</Text>
+                    <Text className="w-[16%] text-xs text-muted-foreground font-medium">{unit.toUpperCase()}</Text>
+                    <Text className="w-[16%] text-xs text-muted-foreground font-medium">REPS</Text>
+                    <Text className="w-[12%] text-xs text-muted-foreground font-medium">RPE</Text>
+                    <Text className="w-[14%] text-xs text-muted-foreground font-medium text-center">✓</Text>
                     <Text className="w-[12%] text-xs text-muted-foreground font-medium text-center"></Text>
                   </View>
 
@@ -955,19 +1055,19 @@ export default function ActiveWorkout() {
                       )}
                     >
                       <Text className={cn(
-                        'w-[12%] text-sm font-medium',
+                        'w-[10%] text-sm font-medium',
                         set.completed ? 'text-success' : 'text-foreground'
                       )}>{set.id}</Text>
-                      <Text className="w-[25%] text-xs text-muted-foreground">
+                      <Text className="w-[20%] text-xs text-muted-foreground">
                         {set.prevWeight ? `${set.prevWeight} × ${set.prevReps}` : '—'}
                       </Text>
-                      <View className="w-[18%]">
+                      <View className="w-[16%]">
                         <TextInput
                           keyboardType="numeric"
                           value={set.weight}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'weight', text)}
                           className={cn(
-                            'h-8 text-center text-sm rounded border px-2',
+                            'h-8 text-center text-sm rounded border px-1',
                             set.completed 
                               ? 'bg-success/20 text-success border-success/30' 
                               : 'bg-background text-foreground border-border'
@@ -979,13 +1079,13 @@ export default function ActiveWorkout() {
                           editable={!set.completed}
                         />
                       </View>
-                      <View className="w-[18%]">
+                      <View className="w-[16%]">
                         <TextInput
                           keyboardType="numeric"
                           value={set.reps}
                           onChangeText={(text) => handleInputChange(exercise.id, set.id, 'reps', text)}
                           className={cn(
-                            'h-8 text-center text-sm rounded border px-2',
+                            'h-8 text-center text-sm rounded border px-1',
                             set.completed 
                               ? 'bg-success/20 text-success border-success/30' 
                               : 'bg-background text-foreground border-border'
@@ -997,7 +1097,26 @@ export default function ActiveWorkout() {
                           editable={!set.completed}
                         />
                       </View>
-                      <View className="w-[15%] items-center">
+                      <View className="w-[12%]">
+                        <TextInput
+                          keyboardType="numeric"
+                          value={set.rpe}
+                          onChangeText={(text) => handleInputChange(exercise.id, set.id, 'rpe', text)}
+                          className={cn(
+                            'h-8 text-center text-sm rounded border px-1',
+                            set.completed 
+                              ? 'bg-success/20 text-success border-success/30' 
+                              : 'bg-background text-foreground border-border'
+                          )}
+                          placeholder="—"
+                          placeholderTextColor="#71717A"
+                          textAlignVertical="center"
+                          style={{ paddingTop: 0, paddingBottom: 0, lineHeight: 18 }}
+                          editable={!set.completed}
+                          maxLength={2}
+                        />
+                      </View>
+                      <View className="w-[14%] items-center">
                         <Pressable
                           onPress={() => handleSetComplete(exercise.id, set.id)}
                           className={cn(
@@ -1219,8 +1338,21 @@ export default function ActiveWorkout() {
               </View>
             </View>
 
+            {/* Share Button */}
             <Button 
-              className="w-full mt-4 bg-primary"
+              variant="outline"
+              className="w-full mt-2"
+              onPress={() => {
+                setShowCompletionModal(false);
+                setShowShareModal(true);
+              }}
+            >
+              <Share2 size={18} color="#31D5E3" />
+              <Text className="text-primary font-semibold ml-2">Share Workout</Text>
+            </Button>
+
+            <Button 
+              className="w-full bg-primary"
               onPress={() => {
                 setShowCompletionModal(false);
                 router.replace('/(tabs)');
@@ -1231,6 +1363,28 @@ export default function ActiveWorkout() {
           </View>
         </DialogContent>
       </Dialog>
+
+      {/* Share Modal */}
+      <ShareModal
+        open={showShareModal}
+        onOpenChange={(open) => {
+          setShowShareModal(open);
+          if (!open) {
+            // Navigate to dashboard when share modal is closed
+            router.replace('/(tabs)');
+          }
+        }}
+        workoutData={{
+          workoutName: currentDay?.name || 'Workout Session',
+          duration: activeWorkout.startTime 
+            ? Math.floor((Date.now() - new Date(activeWorkout.startTime).getTime()) / 1000)
+            : 0,
+          totalVolume: workoutStats.totalVolume,
+          completedSets: workoutStats.completedSets,
+          prs: 0, // TODO: Track PRs during workout
+          date: new Date(),
+        }}
+      />
 
       {/* Add Exercise Modal */}
       <AddExerciseModal
@@ -1270,6 +1424,7 @@ export default function ActiveWorkout() {
                 id: i + 1,
                 weight: '',
                 reps: '',
+                rpe: '',
                 completed: false,
                 isWarmup: false,
                 tags: [],

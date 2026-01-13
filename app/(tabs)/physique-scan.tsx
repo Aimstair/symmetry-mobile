@@ -4,12 +4,17 @@ import { View, Text, ScrollView, Animated, ActivityIndicator, Alert } from 'reac
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Crypto from 'expo-crypto';
+import * as ImageManipulator from 'expo-image-manipulator';
+import { useNetInfo } from '@react-native-community/netinfo';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
 import { generatePlanFromScan } from '@/utils/aiPlanner';
 import { initializeExerciseLookup } from '@/hooks/useExercises';
+import { supabase } from '@/lib/supabase';
+import { subscriptionService } from '@/services/SubscriptionService';
+import { notificationService } from '@/services/NotificationService';
 import Svg, { Ellipse, Line, Path, Rect, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { 
   Camera, 
@@ -60,9 +65,15 @@ function transformMuscleResults(scan: PhysiqueScanType | null) {
 
 export default function PhysiqueScan() {
   const router = useRouter();
+  const netInfo = useNetInfo();
+  const isConnected = netInfo.isConnected ?? false;
+  
   const [phase, setPhase] = useState<ScanPhase>('idle');
   const [analysisStep, setAnalysisStep] = useState(0);
   const [currentScanResult, setCurrentScanResult] = useState<PhysiqueScanType | null>(null);
+  const [canScan, setCanScan] = useState<boolean | null>(null);
+  const [daysUntilNextScan, setDaysUntilNextScan] = useState<number>(0);
+  const [isCheckingQuota, setIsCheckingQuota] = useState(false);
   
   const headerAnim = useRef(new Animated.Value(0)).current;
   const mainCardAnim = useRef(new Animated.Value(0)).current;
@@ -70,6 +81,7 @@ export default function PhysiqueScan() {
 
   // Get user and data from store
   const user = useAppStore((s) => s.user);
+  const isPro = useAppStore((s) => s.isPro);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const workoutPlans = useAppStore((s) => s.workoutPlans);
   const workoutHistory = useAppStore((s) => s.workoutHistory);
@@ -102,6 +114,7 @@ export default function PhysiqueScan() {
   useFocusEffect(
     useCallback(() => {
       loadProgressData();
+      checkScanQuota(); // Check quota on focus
       
       headerAnim.setValue(0);
       mainCardAnim.setValue(0);
@@ -120,6 +133,154 @@ export default function PhysiqueScan() {
       }
     }, [phase, headerAnim, mainCardAnim, historyAnim, loadProgressData])
   );
+
+  /**
+   * Check if user can perform a scan based on their subscription tier
+   * Tier is determined SERVER-SIDE to prevent client manipulation
+   * Free users: 1 scan per 30 days
+   * Pro users: 1 scan per 7 days
+   */
+  const checkScanQuota = async () => {
+    if (!user?.id) {
+      setCanScan(false);
+      return;
+    }
+    
+    // Skip network call if offline - use cached nextScanDate from store
+    if (!isConnected) {
+      const nextScanDate = useAppStore.getState().nextScanDate;
+      if (nextScanDate) {
+        const canScanNow = new Date(nextScanDate) <= new Date();
+        setCanScan(canScanNow);
+        if (!canScanNow) {
+          const daysRemaining = Math.ceil(
+            (new Date(nextScanDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+          );
+          setDaysUntilNextScan(Math.max(0, daysRemaining));
+        }
+      }
+      return;
+    }
+    
+    setIsCheckingQuota(true);
+    
+    try {
+      // Call the secure Postgres function - tier is determined SERVER-SIDE
+      // No interval_days parameter to prevent client manipulation
+      const { data, error } = await supabase.rpc('check_scan_availability', {
+        p_user_id: user.id,
+      });
+      
+      if (error) {
+        if (__DEV__) console.error('Failed to check scan availability:', error);
+        // On error, allow scan (fail open for better UX)
+        setCanScan(true);
+        setDaysUntilNextScan(0);
+        return;
+      }
+      
+      setCanScan(data);
+      
+      // If can't scan, get days until next scan (also secure - no interval_days)
+      if (!data) {
+        const { data: daysData } = await supabase.rpc('get_days_until_next_scan', {
+          p_user_id: user.id,
+        });
+        setDaysUntilNextScan(daysData || 0);
+      } else {
+        setDaysUntilNextScan(0);
+      }
+      
+      // Update cached next scan date in store
+      const { data: nextDate } = await supabase.rpc('get_next_scan_date', {
+        p_user_id: user.id,
+      });
+      if (nextDate) {
+        useAppStore.getState().setNextScanDate(nextDate);
+      }
+    } catch (error) {
+      if (__DEV__) console.error('Error checking scan quota:', error);
+      setCanScan(true); // Fail open
+    } finally {
+      setIsCheckingQuota(false);
+    }
+  };
+
+  /**
+   * Log a completed scan to the database for quota tracking
+   */
+  const logScanUsage = async () => {
+    if (!user?.id) return;
+    
+    try {
+      const { error } = await supabase.from('scan_logs').insert({
+        user_id: user.id,
+        scan_type: 'physique',
+      });
+      
+      if (error) {
+        console.error('Failed to log scan:', error);
+      }
+    } catch (error) {
+      console.error('Error logging scan:', error);
+    }
+  };
+
+  /**
+   * Compress an image before saving (reduces storage and bandwidth)
+   */
+  const compressImage = async (uri: string): Promise<string> => {
+    try {
+      const result = await ImageManipulator.manipulateAsync(
+        uri,
+        [{ resize: { width: 800 } }], // Resize to max 800px width
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
+      );
+      return result.uri;
+    } catch (error) {
+      console.error('Failed to compress image:', error);
+      return uri; // Return original on failure
+    }
+  };
+
+  /**
+   * Check if user can scan and show appropriate message
+   */
+  const canPerformScan = (): boolean => {
+    // Check network connectivity first - AI analysis requires internet
+    if (!isConnected) {
+      Alert.alert(
+        'No Internet Connection',
+        'Internet is required for AI analysis. Please check your connection and try again.',
+        [{ text: 'OK' }]
+      );
+      return false;
+    }
+    
+    // If still checking, allow to proceed (will check again)
+    if (canScan === null || isCheckingQuota) return true;
+    
+    if (!canScan) {
+      const tierName = isPro ? 'Pro' : 'Free';
+      const frequency = isPro ? 'once per week' : 'once per month';
+      
+      Alert.alert(
+        'Scan Limit Reached',
+        isPro
+          ? `Pro users can scan ${frequency}. Your next scan is available in ${daysUntilNextScan} day${daysUntilNextScan !== 1 ? 's' : ''}.`
+          : `Free users can scan ${frequency}. Upgrade to Pro to scan weekly!\n\nYour next scan is available in ${daysUntilNextScan} day${daysUntilNextScan !== 1 ? 's' : ''}.`,
+        isPro
+          ? [{ text: 'OK' }]
+          : [
+              { text: 'Maybe Later', style: 'cancel' },
+              { text: 'Upgrade to Pro', onPress: () => router.push('/paywall') },
+            ]
+      );
+      return false;
+    }
+    
+    return true;
+  };
 
   useEffect(() => {
     headerAnim.setValue(0);
@@ -147,6 +308,11 @@ export default function PhysiqueScan() {
 
   const startScan = async () => {
     if (!user) return;
+    
+    // Check scan quota before proceeding
+    if (!canPerformScan()) {
+      return;
+    }
     
     setPhase('scanning');
     setAnalysisStep(0);
@@ -185,6 +351,18 @@ export default function PhysiqueScan() {
           try {
             const savedScan = await syncAddPhysiqueScan(newScan);
             setCurrentScanResult(savedScan);
+            
+            // Log scan usage for quota tracking (after successful save)
+            await logScanUsage();
+            
+            // Refresh quota status
+            await checkScanQuota();
+            
+            // Schedule notification for next scan availability
+            const nextScanDate = useAppStore.getState().nextScanDate;
+            if (nextScanDate) {
+              await notificationService.scheduleScanAvailability(new Date(nextScanDate));
+            }
 
             // Generate AI workout plan from scan results
             if (user) {
@@ -378,14 +556,38 @@ export default function PhysiqueScan() {
                   </View>
                 </View>
 
+                {/* Network Status Warning */}
+                {!isConnected && (
+                  <View className="bg-destructive/20 border border-destructive/40 rounded-lg p-3 mt-4 mb-2">
+                    <Text className="text-destructive text-sm text-center font-medium">
+                      No Internet Connection
+                    </Text>
+                    <Text className="text-destructive/70 text-xs text-center mt-1">
+                      Internet required for AI analysis
+                    </Text>
+                  </View>
+                )}
+
                 <Button 
                   onPress={startScan}
-                  className="w-full mt-4 bg-primary h-12"
+                  className={`w-full mt-4 h-12 ${!isConnected || (canScan === false) ? 'bg-muted' : 'bg-primary'}`}
+                  disabled={!isConnected || canScan === false || isCheckingQuota}
                 >
-                  <ScanLine size={20} color="#FFFFFF" />
-                  <Text className="text-primary-foreground font-semibold ml-2">
-                    Start Scan
-                  </Text>
+                  {isCheckingQuota ? (
+                    <>
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                      <Text className="text-primary-foreground font-semibold ml-2">
+                        Checking...
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      <ScanLine size={20} color={!isConnected || canScan === false ? '#71717A' : '#FFFFFF'} />
+                      <Text className={`font-semibold ml-2 ${!isConnected || canScan === false ? 'text-muted-foreground' : 'text-primary-foreground'}`}>
+                        {!isConnected ? 'Offline' : canScan === false ? `Available in ${daysUntilNextScan} days` : 'Start Scan'}
+                      </Text>
+                    </>
+                  )}
                 </Button>
               </GlassCard>
               </Animated.View>

@@ -7,7 +7,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useExercises } from '@/hooks/useExercises';
-import { ChevronLeft, Plus, X, Check, Search } from 'lucide-react-native';
+import { ChevronLeft, Plus, X, Check, Search, Link, Unlink } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import type { WorkoutPlan, WorkoutDay, PlanExercise, CatalogExercise } from '@/types';
 
@@ -17,6 +17,7 @@ interface SelectedExercise {
   targetReps: string;
   restSeconds: number;
   notes?: string;
+  supersetId?: string; // Group exercises into supersets
 }
 
 const MUSCLE_GROUPS = [
@@ -52,6 +53,10 @@ export default function WorkoutBuilder() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showExercisePicker, setShowExercisePicker] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  
+  // Superset linking state
+  const [isLinkingMode, setIsLinkingMode] = useState(false);
+  const [selectedForSuperset, setSelectedForSuperset] = useState<string[]>([]);
 
   // Animation
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -109,6 +114,57 @@ export default function WorkoutBuilder() {
 
   const removeExercise = (exerciseId: string) => {
     setSelectedExercises((prev) => prev.filter((e) => e.exerciseId !== exerciseId));
+    // Also remove from superset selection
+    setSelectedForSuperset((prev) => prev.filter((id) => id !== exerciseId));
+  };
+
+  // Toggle exercise selection for superset linking
+  const toggleSupersetSelection = (exerciseId: string) => {
+    setSelectedForSuperset((prev) => {
+      if (prev.includes(exerciseId)) {
+        return prev.filter((id) => id !== exerciseId);
+      }
+      // Limit to 2 exercises per superset link action
+      if (prev.length >= 2) {
+        return [prev[1], exerciseId]; // Replace oldest selection
+      }
+      return [...prev, exerciseId];
+    });
+  };
+
+  // Link selected exercises as a superset
+  const linkSuperset = () => {
+    if (selectedForSuperset.length < 2) return;
+    
+    const supersetId = `superset_${Date.now()}`;
+    
+    setSelectedExercises((prev) =>
+      prev.map((ex) =>
+        selectedForSuperset.includes(ex.exerciseId)
+          ? { ...ex, supersetId }
+          : ex
+      )
+    );
+    
+    setSelectedForSuperset([]);
+    setIsLinkingMode(false);
+  };
+
+  // Unlink an exercise from its superset
+  const unlinkFromSuperset = (exerciseId: string) => {
+    setSelectedExercises((prev) =>
+      prev.map((ex) =>
+        ex.exerciseId === exerciseId ? { ...ex, supersetId: undefined } : ex
+      )
+    );
+  };
+
+  // Get superset color based on supersetId
+  const getSupersetColor = (supersetId?: string): string => {
+    if (!supersetId) return 'transparent';
+    const colors = ['#8B5CF6', '#F59E0B', '#10B981', '#EC4899', '#3B82F6'];
+    const hash = supersetId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    return colors[hash % colors.length];
   };
 
   const updateExercise = (exerciseId: string, updates: Partial<SelectedExercise>) => {
@@ -285,15 +341,55 @@ export default function WorkoutBuilder() {
               <Text className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
                 Exercises ({selectedExercises.length})
               </Text>
-              <Button
-                variant="ghost"
-                size="sm"
-                onPress={() => setShowExercisePicker(true)}
-                className="flex-row items-center"
-              >
-                <Plus size={16} color="#31D5E3" />
-                <Text className="text-primary ml-1">Add</Text>
-              </Button>
+              <View className="flex-row items-center gap-2">
+                {/* Link Exercises Button */}
+                {selectedExercises.length >= 2 && (
+                  <Button
+                    variant={isLinkingMode ? 'default' : 'ghost'}
+                    size="sm"
+                    onPress={() => {
+                      if (isLinkingMode && selectedForSuperset.length >= 2) {
+                        linkSuperset();
+                      } else {
+                        setIsLinkingMode(!isLinkingMode);
+                        if (!isLinkingMode) setSelectedForSuperset([]);
+                      }
+                    }}
+                    className={cn('flex-row items-center', isLinkingMode && 'bg-primary')}
+                  >
+                    <Link size={16} color={isLinkingMode ? '#FFFFFF' : '#8B5CF6'} />
+                    <Text className={cn('ml-1', isLinkingMode ? 'text-white' : 'text-[#8B5CF6]')}>
+                      {isLinkingMode 
+                        ? selectedForSuperset.length >= 2 
+                          ? 'Link' 
+                          : `Select (${selectedForSuperset.length}/2)`
+                        : 'Superset'
+                      }
+                    </Text>
+                  </Button>
+                )}
+                {isLinkingMode && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onPress={() => {
+                      setIsLinkingMode(false);
+                      setSelectedForSuperset([]);
+                    }}
+                  >
+                    <X size={16} color="#71717A" />
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onPress={() => setShowExercisePicker(true)}
+                  className="flex-row items-center"
+                >
+                  <Plus size={16} color="#31D5E3" />
+                  <Text className="text-primary ml-1">Add</Text>
+                </Button>
+              </View>
             </View>
 
             {selectedExercises.length === 0 ? (
@@ -307,68 +403,129 @@ export default function WorkoutBuilder() {
               <View className="gap-3">
                 {selectedExercises.map((ex, idx) => {
                   const details = getExerciseDetails(ex.exerciseId);
+                  const isSelectedForLink = selectedForSuperset.includes(ex.exerciseId);
+                  const supersetColor = getSupersetColor(ex.supersetId);
+                  const hasSuperset = !!ex.supersetId;
+                  
+                  // Check if next exercise is in same superset (for connector line)
+                  const nextEx = selectedExercises[idx + 1];
+                  const isConnectedToNext = hasSuperset && nextEx?.supersetId === ex.supersetId;
+                  
                   return (
-                    <GlassCard key={ex.exerciseId} className="py-3">
-                      <View className="flex-row items-center gap-3 mb-3">
-                        <View className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
-                          <Text className="text-sm font-bold text-foreground">{idx + 1}</Text>
-                        </View>
-                        <View className="flex-1">
-                          <Text className="font-medium text-sm text-foreground">
-                            {details?.name || ex.exerciseId}
-                          </Text>
-                          <Text className="text-xs text-muted-foreground">
-                            {details?.muscleGroups.join(' • ')}
-                          </Text>
-                        </View>
-                        <Pressable
-                          onPress={() => removeExercise(ex.exerciseId)}
-                          className="w-8 h-8 items-center justify-center"
+                    <View key={ex.exerciseId} className="relative">
+                      {/* Superset connector line */}
+                      {isConnectedToNext && (
+                        <View 
+                          className="absolute left-4 top-full w-0.5 h-3 z-10"
+                          style={{ backgroundColor: supersetColor }}
+                        />
+                      )}
+                      
+                      <Pressable
+                        onPress={() => isLinkingMode && toggleSupersetSelection(ex.exerciseId)}
+                        disabled={!isLinkingMode}
+                      >
+                        <GlassCard 
+                          className={cn(
+                            'py-3',
+                            isSelectedForLink && 'border-2 border-[#8B5CF6]',
+                            hasSuperset && 'border-l-4'
+                          )}
+                          style={hasSuperset ? { borderLeftColor: supersetColor } : {}}
                         >
-                          <X size={16} color="#71717A" />
-                        </Pressable>
-                      </View>
+                          <View className="flex-row items-center gap-3 mb-3">
+                            {/* Linking mode checkbox */}
+                            {isLinkingMode && (
+                              <View className={cn(
+                                'w-6 h-6 rounded border-2 items-center justify-center',
+                                isSelectedForLink ? 'bg-[#8B5CF6] border-[#8B5CF6]' : 'border-muted-foreground'
+                              )}>
+                                {isSelectedForLink && <Check size={14} color="#FFFFFF" />}
+                              </View>
+                            )}
+                            
+                            <View className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
+                              <Text className="text-sm font-bold text-foreground">{idx + 1}</Text>
+                            </View>
+                            <View className="flex-1">
+                              <View className="flex-row items-center gap-2">
+                                <Text className="font-medium text-sm text-foreground">
+                                  {details?.name || ex.exerciseId}
+                                </Text>
+                                {hasSuperset && (
+                                  <View 
+                                    className="px-2 py-0.5 rounded-full"
+                                    style={{ backgroundColor: supersetColor + '30' }}
+                                  >
+                                    <Text className="text-xs" style={{ color: supersetColor }}>Superset</Text>
+                                  </View>
+                                )}
+                              </View>
+                              <Text className="text-xs text-muted-foreground">
+                                {details?.muscleGroups.join(' • ')}
+                              </Text>
+                            </View>
+                            
+                            {/* Unlink button for supersets */}
+                            {hasSuperset && !isLinkingMode && (
+                              <Pressable
+                                onPress={() => unlinkFromSuperset(ex.exerciseId)}
+                                className="w-8 h-8 items-center justify-center"
+                              >
+                                <Unlink size={16} color={supersetColor} />
+                              </Pressable>
+                            )}
+                            
+                            <Pressable
+                              onPress={() => removeExercise(ex.exerciseId)}
+                              className="w-8 h-8 items-center justify-center"
+                            >
+                              <X size={16} color="#71717A" />
+                            </Pressable>
+                          </View>
 
-                      {/* Exercise Parameters */}
-                      <View className="flex-row gap-2">
-                        <View className="flex-1">
-                          <Text className="text-xs text-muted-foreground mb-1">Sets</Text>
-                          <TextInput
-                            value={String(ex.targetSets)}
-                            onChangeText={(text) =>
-                              updateExercise(ex.exerciseId, {
-                                targetSets: parseInt(text) || 3,
-                              })
-                            }
-                            keyboardType="number-pad"
-                            className="bg-muted rounded-lg px-3 py-2 text-foreground"
-                          />
-                        </View>
-                        <View className="flex-1">
-                          <Text className="text-xs text-muted-foreground mb-1">Reps</Text>
-                          <TextInput
-                            value={ex.targetReps}
-                            onChangeText={(text) =>
-                              updateExercise(ex.exerciseId, { targetReps: text })
-                            }
-                            className="bg-muted rounded-lg px-3 py-2 text-foreground"
-                          />
-                        </View>
-                        <View className="flex-1">
-                          <Text className="text-xs text-muted-foreground mb-1">Rest (s)</Text>
-                          <TextInput
-                            value={String(ex.restSeconds)}
-                            onChangeText={(text) =>
-                              updateExercise(ex.exerciseId, {
-                                restSeconds: parseInt(text) || 90,
-                              })
-                            }
-                            keyboardType="number-pad"
-                            className="bg-muted rounded-lg px-3 py-2 text-foreground"
-                          />
-                        </View>
-                      </View>
-                    </GlassCard>
+                          {/* Exercise Parameters */}
+                          <View className="flex-row gap-2">
+                            <View className="flex-1">
+                              <Text className="text-xs text-muted-foreground mb-1">Sets</Text>
+                              <TextInput
+                                value={String(ex.targetSets)}
+                                onChangeText={(text) =>
+                                  updateExercise(ex.exerciseId, {
+                                    targetSets: parseInt(text) || 3,
+                                  })
+                                }
+                                keyboardType="number-pad"
+                                className="bg-muted rounded-lg px-3 py-2 text-foreground"
+                              />
+                            </View>
+                            <View className="flex-1">
+                              <Text className="text-xs text-muted-foreground mb-1">Reps</Text>
+                              <TextInput
+                                value={ex.targetReps}
+                                onChangeText={(text) =>
+                                  updateExercise(ex.exerciseId, { targetReps: text })
+                                }
+                                className="bg-muted rounded-lg px-3 py-2 text-foreground"
+                              />
+                            </View>
+                            <View className="flex-1">
+                              <Text className="text-xs text-muted-foreground mb-1">Rest (s)</Text>
+                              <TextInput
+                                value={String(ex.restSeconds)}
+                                onChangeText={(text) =>
+                                  updateExercise(ex.exerciseId, {
+                                    restSeconds: parseInt(text) || 90,
+                                  })
+                                }
+                                keyboardType="number-pad"
+                                className="bg-muted rounded-lg px-3 py-2 text-foreground"
+                              />
+                            </View>
+                          </View>
+                        </GlassCard>
+                      </Pressable>
+                    </View>
                   );
                 })}
               </View>

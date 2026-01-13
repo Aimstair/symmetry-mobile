@@ -2,11 +2,16 @@ import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-rout
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { View, Text, ActivityIndicator, AppState, AppStateStatus } from 'react-native';
+import { View, Text, ActivityIndicator, AppState, AppStateStatus, TouchableOpacity, Modal } from 'react-native';
 import { Session } from '@supabase/supabase-js';
 import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
+import { configService, ConfigStatus } from '@/services/ConfigService';
 import '../global.css';
+
+// Initialize Sentry for crash reporting
+import { initializeSentry, withSentry, SentryErrorBoundary, setUserContext, clearUserContext } from '@/lib/monitoring';
+initializeSentry();
 
 // Prevent auto-hide splash screen
 SplashScreen.preventAutoHideAsync();
@@ -30,6 +35,93 @@ import { useAppStore } from '@/store/useAppStore';
 import { useDataInitialization } from '@/hooks/useDataInitialization';
 import { supabase } from '@/lib/supabase';
 import { initializeExerciseLookup } from '@/hooks/useExercises';
+
+/**
+ * Maintenance Screen Component
+ * 
+ * Shown when the app is under maintenance mode.
+ * Blocks all app functionality until maintenance is complete.
+ */
+function MaintenanceScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <View className="flex-1 bg-background items-center justify-center px-6">
+      <Text className="text-6xl mb-6">🔧</Text>
+      <Text className="text-2xl font-bold text-foreground mb-4 text-center">
+        Under Maintenance
+      </Text>
+      <Text className="text-muted-foreground text-center mb-8 leading-6">
+        {message || 'We are currently performing scheduled maintenance. Please check back soon!'}
+      </Text>
+      <TouchableOpacity
+        onPress={onRetry}
+        className="bg-primary/20 border border-primary px-8 py-4 rounded-xl"
+      >
+        <Text className="text-primary font-semibold text-lg">Try Again</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+/**
+ * Force Update Modal Component
+ * 
+ * Shown when the app version is below the minimum required.
+ * User must update to continue using the app.
+ */
+function ForceUpdateModal({ 
+  visible, 
+  currentVersion, 
+  minVersion, 
+  storeUrl 
+}: { 
+  visible: boolean; 
+  currentVersion: string; 
+  minVersion: string;
+  storeUrl: string;
+}) {
+  const handleUpdate = () => {
+    Linking.openURL(storeUrl).catch((err) => {
+      console.error('Failed to open store:', err);
+    });
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="fade"
+      transparent={true}
+      statusBarTranslucent
+    >
+      <View className="flex-1 bg-black/80 items-center justify-center px-6">
+        <View className="bg-card rounded-2xl p-8 w-full max-w-sm border border-border">
+          <Text className="text-5xl text-center mb-4">📲</Text>
+          <Text className="text-2xl font-bold text-foreground text-center mb-3">
+            Update Required
+          </Text>
+          <Text className="text-muted-foreground text-center mb-6 leading-6">
+            A new version of Symmetry is available. Please update to continue using the app.
+          </Text>
+          <View className="bg-muted/30 rounded-lg p-3 mb-6">
+            <Text className="text-muted-foreground text-center text-sm">
+              Your version: <Text className="text-foreground font-semibold">{currentVersion}</Text>
+            </Text>
+            <Text className="text-muted-foreground text-center text-sm mt-1">
+              Minimum required: <Text className="text-primary font-semibold">{minVersion}</Text>
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={handleUpdate}
+            className="bg-primary py-4 rounded-xl"
+          >
+            <Text className="text-primary-foreground font-bold text-lg text-center">
+              Update Now
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
 
 /**
  * Extract OAuth tokens from a deep link URL
@@ -80,11 +172,63 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const isFetchingProfile = useRef(false); // Prevent concurrent fetches
   
+  // Config status for maintenance mode and force update
+  const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null);
+  const [isConfigLoading, setIsConfigLoading] = useState(true);
+  
   // Get user and onboarding state from store
   const user = useAppStore((s) => s.user);
   const setUser = useAppStore((s) => s.setUser);
   const onboarding = useAppStore((s) => s.onboarding);
   const completeOnboarding = useAppStore((s) => s.completeOnboarding);
+
+  // Fetch app configuration on mount
+  const checkConfig = useCallback(async () => {
+    setIsConfigLoading(true);
+    try {
+      const status = await configService.getConfigStatus();
+      setConfigStatus(status);
+      
+      if (__DEV__) {
+        console.log('📱 Config status:', {
+          maintenanceMode: status.maintenanceMode,
+          updateRequired: status.updateRequired,
+          currentVersion: status.currentVersion,
+          minVersion: status.minVersion,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to fetch config:', error);
+      // Proceed without blocking if config fetch fails
+      setConfigStatus({
+        isLoaded: false,
+        updateRequired: false,
+        maintenanceMode: false,
+        maintenanceMessage: '',
+        storeUrl: '',
+        currentVersion: '1.0.0',
+        minVersion: '1.0.0',
+        latestVersion: '1.0.0',
+        featureFlags: {},
+      });
+    } finally {
+      setIsConfigLoading(false);
+    }
+  }, []);
+
+  // Check config on mount and when app comes to foreground
+  useEffect(() => {
+    checkConfig();
+
+    const subscription = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'active') {
+        // Refresh config when app becomes active
+        checkConfig();
+      }
+    });
+
+    return () => subscription.remove();
+  }, [checkConfig]);
 
   // Handle deep link URL for OAuth callback
   const handleDeepLink = useCallback(async (url: string) => {
@@ -237,10 +381,20 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
             setUser(cloudUser);
             completeOnboarding();
             
+            // Set Sentry user context for crash reporting
+            setUserContext({
+              id: cloudUser.id,
+              email: cloudUser.email,
+              name: cloudUser.name,
+            });
+            
             if (__DEV__) {
               console.log('✅ User profile loaded and store updated');
             }
           } else {
+            // Clear Sentry user context if no profile
+            clearUserContext();
+            
             if (__DEV__) {
               console.log('ℹ️ No user profile found - user needs onboarding');
             }
@@ -307,8 +461,8 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [session, isAuthLoading, isProfileLoading, profileChecked, isReady]);
 
-  // Show loading while checking auth or loading profile
-  if (isAuthLoading || isProfileLoading) {
+  // Show loading while checking config, auth, or loading profile
+  if (isConfigLoading || isAuthLoading || isProfileLoading) {
     return (
       <View className="flex-1 bg-background items-center justify-center">
         <ActivityIndicator size="large" color="#31D5E3" />
@@ -316,6 +470,32 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
           {isProfileLoading ? 'Loading profile...' : 'Loading...'}
         </Text>
       </View>
+    );
+  }
+
+  // Show maintenance screen if in maintenance mode
+  if (configStatus?.maintenanceMode) {
+    return (
+      <MaintenanceScreen 
+        message={configStatus.maintenanceMessage} 
+        onRetry={checkConfig}
+      />
+    );
+  }
+
+  // Show force update modal if version is outdated
+  // The modal is not dismissible - user must update
+  if (configStatus?.updateRequired) {
+    return (
+      <>
+        {children}
+        <ForceUpdateModal
+          visible={true}
+          currentVersion={configStatus.currentVersion}
+          minVersion={configStatus.minVersion}
+          storeUrl={configStatus.storeUrl}
+        />
+      </>
     );
   }
 
@@ -526,7 +706,34 @@ function DataInitializer({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-export default function RootLayout() {
+/**
+ * Error Fallback Component
+ * Shown when an unhandled error occurs in the app
+ */
+function ErrorFallback({ error, resetError }: { error: Error; resetError: () => void }) {
+  return (
+    <View className="flex-1 bg-background items-center justify-center px-6">
+      <Text className="text-6xl mb-4">😟</Text>
+      <Text className="text-xl font-bold text-foreground mb-2">Something went wrong</Text>
+      <Text className="text-muted-foreground text-center mb-6">
+        We're sorry, but something unexpected happened. Our team has been notified.
+      </Text>
+      {__DEV__ && (
+        <View className="bg-destructive/10 p-4 rounded-lg mb-6 max-w-full">
+          <Text className="text-destructive text-xs font-mono">{error.message}</Text>
+        </View>
+      )}
+      <TouchableOpacity
+        onPress={resetError}
+        className="bg-primary px-6 py-3 rounded-lg"
+      >
+        <Text className="text-primary-foreground font-semibold">Try Again</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function RootLayout() {
   // Initialize and log data service on mount
   useEffect(() => {
     if (__DEV__) {
@@ -550,41 +757,54 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <SafeAreaProvider>
-      <StatusBar style="light" />
-      <AuthProvider>
-        <DataInitializer>
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: 'hsl(240, 10%, 3.9%)' },
-              animation: 'slide_from_right',
-            }}
-          >
-            <Stack.Screen name="index" options={{ headerShown: false }} />
-            <Stack.Screen name="login" options={{ headerShown: false }} />
-            <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
-            <Stack.Screen name="onboarding" options={{ headerShown: false }} />
-            <Stack.Screen name="workout-builder" options={{ headerShown: false }} />
-            <Stack.Screen name="symmetry-history" 
-              options={{ 
+    <SentryErrorBoundary fallback={({ error, resetError }) => <ErrorFallback error={error} resetError={resetError} />}>
+      <SafeAreaProvider>
+        <StatusBar style="light" />
+        <AuthProvider>
+          <DataInitializer>
+            <Stack
+              screenOptions={{
                 headerShown: false,
+                contentStyle: { backgroundColor: 'hsl(240, 10%, 3.9%)' },
                 animation: 'slide_from_right',
-              }} 
-            />
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen
-              name="active-workout"
-              options={{
-                headerShown: false,
-                presentation: 'fullScreenModal',
-                animation: 'slide_from_bottom',
               }}
-            />
-          </Stack>
-          <NavigationGuard />
-        </DataInitializer>
-      </AuthProvider>
-    </SafeAreaProvider>
+            >
+              <Stack.Screen name="index" options={{ headerShown: false }} />
+              <Stack.Screen name="login" options={{ headerShown: false }} />
+              <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
+              <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+              <Stack.Screen name="workout-builder" options={{ headerShown: false }} />
+              <Stack.Screen 
+                name="paywall" 
+                options={{ 
+                  headerShown: false,
+                  presentation: 'modal',
+                  animation: 'slide_from_bottom',
+                }} 
+              />
+              <Stack.Screen name="symmetry-history" 
+                options={{ 
+                  headerShown: false,
+                  animation: 'slide_from_right',
+                }} 
+              />
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen
+                name="active-workout"
+                options={{
+                  headerShown: false,
+                  presentation: 'fullScreenModal',
+                  animation: 'slide_from_bottom',
+                }}
+              />
+            </Stack>
+            <NavigationGuard />
+          </DataInitializer>
+        </AuthProvider>
+      </SafeAreaProvider>
+    </SentryErrorBoundary>
   );
 }
+
+// Wrap with Sentry for crash reporting
+export default withSentry(RootLayout);

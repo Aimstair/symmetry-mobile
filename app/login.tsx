@@ -39,8 +39,8 @@ export default function Login() {
 
       // 1. Create the Deep Link
       // Ensure this matches your Supabase > Auth > URL Configuration > Site URL
-      // If you are using the wildcard (exp://**), this standard createURL is fine.
-      const redirectUri = Linking.createURL('/');
+      // Force the 'symmetry' scheme to avoid redirecting to Expo Go in production
+      const redirectUri = Linking.createURL('/', { scheme: 'symmetry' });
 
       console.log('🔗 OAuth redirect URI:', redirectUri);
 

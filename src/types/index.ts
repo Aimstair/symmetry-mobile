@@ -25,6 +25,7 @@ export interface User {
   goal: 'bulk' | 'cut' | 'recomp' | 'maintenance';
   experienceLevel: 'beginner' | 'intermediate' | 'advanced';
   trainingDays: string[]; // e.g., ['Monday', 'Wednesday', 'Friday']
+  workoutsCompleted: number; // Track completed workouts for review triggers
   createdAt: Date;
   updatedAt: Date;
 }

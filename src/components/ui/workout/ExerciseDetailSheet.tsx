@@ -4,6 +4,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Video, ResizeMode } from 'expo-av';
 import { getVideoForExercise } from '@/lib/videoRegistry';
+import { useCachedVideo } from '@/lib/videoCaching';
 import {
   Timer,
   Check,
@@ -137,10 +138,13 @@ export function ExerciseDetailSheet({
   };
   
   const exerciseId = catalogExercise ? catalogExercise.id : exercise.id;
-  const videoSource = exerciseId ? getVideoForExercise(exerciseId) : null;
+  const remoteVideoUrl = exerciseId ? getVideoForExercise(exerciseId) : null;
+  
+  // Use cached video hook for automatic local caching
+  const { uri: videoUri, isLocal: isVideoCached, isLoading: isVideoLoading } = useCachedVideo(remoteVideoUrl);
   
   // Debug: Log exercise ID to help match with video registry
-  if (__DEV__ && !videoSource) {
+  if (__DEV__ && !remoteVideoUrl) {
     console.log('🎥 No video found for exercise ID:', exerciseId, '| Exercise name:', exercise.name);
   }
 
@@ -176,19 +180,31 @@ export function ExerciseDetailSheet({
             <View className="p-4 gap-4 pb-8">
               {/* Video/Animation Placeholder */}
               <GlassCard className="overflow-hidden p-0">
-                {videoSource ? (
-                  <Video
-                    ref={videoRef}
-                    source={videoSource}
-                    style={{ width: '100%', aspectRatio: 16 / 9 }}
-                    resizeMode={ResizeMode.COVER}
-                    useNativeControls={true} // Allows user to scrub/fullscreen
-                    isLooping={true}
-                    shouldPlay={true} // Don't auto-play to save battery/data? Or set to true.
-                    isMuted={true} // Usually better for gym apps
-                  />
+                {isVideoLoading ? (
+                  <View className="bg-muted/50 items-center justify-center" style={{ aspectRatio: 16 / 9 }}>
+                    <ActivityIndicator size="large" color="#31D5E3" />
+                    <Text className="text-sm text-muted-foreground mt-3">Loading video...</Text>
+                  </View>
+                ) : videoUri ? (
+                  <View>
+                    <Video
+                      ref={videoRef}
+                      source={{ uri: videoUri }}
+                      style={{ width: '100%', aspectRatio: 16 / 9 }}
+                      resizeMode={ResizeMode.COVER}
+                      useNativeControls={true}
+                      isLooping={true}
+                      shouldPlay={true}
+                      isMuted={true}
+                    />
+                    {isVideoCached && (
+                      <View className="absolute top-2 right-2 bg-success/80 px-2 py-1 rounded-full">
+                        <Text className="text-xs text-white">Cached</Text>
+                      </View>
+                    )}
+                  </View>
                 ) : (
-                  /* Fallback Placeholder (Your original design) */
+                  /* Fallback Placeholder */
                   <View className="bg-muted/50 items-center justify-center relative" style={{ aspectRatio: 16 / 9 }}>
                     <View className="w-24 h-24 rounded-full bg-muted/20 items-center justify-center">
                       <AlertCircle size={40} color="#71717A" style={{ opacity: 0.5 }} />

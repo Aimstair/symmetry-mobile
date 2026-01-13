@@ -11,7 +11,7 @@
 import { createClient } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { AppState, AppStateStatus } from 'react-native';
+import { AppState, AppStateStatus, Alert } from 'react-native';
 import 'react-native-url-polyfill/auto';
 
 // Get environment variables
@@ -23,6 +23,35 @@ if (!supabaseUrl || !supabaseAnonKey) {
     '⚠️  Supabase URL or Anon Key not found in environment variables.\n' +
     'Make sure to set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in your .env file.'
   );
+}
+
+// CRITICAL: Production environment check
+// Prevents releasing a build configured with local/dev Supabase URL
+if (!__DEV__ && supabaseUrl) {
+  const isLocalUrl = supabaseUrl.includes('192.168') || 
+                     supabaseUrl.includes('localhost') || 
+                     supabaseUrl.includes('127.0.0.1') ||
+                     supabaseUrl.includes('.local');
+  
+  if (isLocalUrl) {
+    // This is a production build but configured with a local URL!
+    console.error('🚨 CRITICAL: Production build configured with local Supabase URL:', supabaseUrl);
+    
+    // Show alert to user (will appear on app launch)
+    setTimeout(() => {
+      Alert.alert(
+        'Configuration Error',
+        'This build is configured with a development URL and cannot connect to the server. Please contact support or reinstall the app.',
+        [{ text: 'OK' }]
+      );
+    }, 1000);
+    
+    // Also throw error to make it very visible in crash reporting
+    throw new Error(
+      `Production build configured with local Supabase URL: ${supabaseUrl}. ` +
+      'Please check EAS Secrets and ensure EXPO_PUBLIC_SUPABASE_URL is set to the production URL.'
+    );
+  }
 }
 
 // Robust storage adapter for Supabase Auth

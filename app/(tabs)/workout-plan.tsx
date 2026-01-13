@@ -5,6 +5,7 @@ import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator, Alert, 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { ActiveDayModal } from '@/components/ui/workout/ActiveDayModal';
 import { SwapExerciseModal } from '@/components/ui/workout/SwapExerciseModal';
 import { AddExerciseModal } from '@/components/ui/workout/AddExerciseModal';
@@ -403,6 +404,27 @@ export default function WorkoutPlanScreen() {
       <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
         <ActivityIndicator size="large" color="#31D5E3" />
         <Text className="text-muted-foreground mt-4">Loading workout plan...</Text>
+      </SafeAreaView>
+    );
+  }
+
+  // Empty state - no workout plans
+  if (workoutPlans.length === 0) {
+    return (
+      <SafeAreaView edges={['top']} className="flex-1 bg-background">
+        <View className="px-4 py-6 mb-6">
+          <Text className="text-2xl font-bold text-foreground">Workout Plan</Text>
+          <Text className="text-sm text-muted-foreground">Plan your training week</Text>
+        </View>
+        <EmptyState
+          icon={Dumbbell}
+          title="No plans found"
+          description="Create a custom routine or use the AI planner to generate a personalized workout plan."
+          action={{
+            label: 'Create Plan',
+            onPress: () => router.push('/workout-builder'),
+          }}
+        />
       </SafeAreaView>
     );
   }
