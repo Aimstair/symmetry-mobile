@@ -74,6 +74,51 @@ class HealthService {
   private hasPermissions: boolean = false;
 
   /**
+   * Android Health Connect permission dialog can crash in some dev/client states
+   * if native activity result delegates are not fully initialized.
+    * Keep auto-prompt enabled by default and allow explicit opt-out via env.
+   */
+  private shouldPromptAndroidPermissions(): boolean {
+    return process.env.EXPO_PUBLIC_ENABLE_HEALTH_CONNECT_PROMPT !== 'false';
+  }
+
+  private async ensureAndroidClientInitialized(): Promise<boolean> {
+    if (!HealthConnect) return false;
+    if (this.isInitialized) return true;
+
+    try {
+      const initialized = await HealthConnect.initialize();
+      this.isInitialized = initialized;
+      return initialized;
+    } catch (error) {
+      if (__DEV__) {
+        console.log('Health Connect initialization skipped:', error);
+      }
+      return false;
+    }
+  }
+
+  private async getAndroidGrantedPermissions(): Promise<any[]> {
+    if (!HealthConnect) return [];
+
+    try {
+      const initialized = await this.ensureAndroidClientInitialized();
+      if (!initialized) return [];
+
+      const getter = (HealthConnect as any).getGrantedPermissions;
+      if (typeof getter !== 'function') return [];
+
+      const granted = await getter();
+      return Array.isArray(granted) ? granted : [];
+    } catch (error) {
+      if (__DEV__) {
+        console.log('Health Connect granted-permission check skipped:', error);
+      }
+      return [];
+    }
+  }
+
+  /**
    * Check if health services are available on this device
    */
   isAvailable(): boolean {
@@ -179,8 +224,32 @@ class HealthService {
 
     try {
       // Initialize Health Connect
-      const isInitialized = await HealthConnect.initialize();
+      const isInitialized = await this.ensureAndroidClientInitialized();
       if (!isInitialized) {
+        return {
+          granted: false,
+          workouts: false,
+          bodyMass: false,
+          activeEnergy: false,
+        };
+      }
+
+      // First check existing permissions without launching native UI.
+      const existingPermissions = await this.getAndroidGrantedPermissions();
+      if (existingPermissions.length > 0) {
+        this.isInitialized = true;
+        this.hasPermissions = true;
+
+        return {
+          granted: true,
+          workouts: existingPermissions.some((p: any) => p.recordType === 'ExerciseSession'),
+          bodyMass: existingPermissions.some((p: any) => p.recordType === 'Weight'),
+          activeEnergy: existingPermissions.some((p: any) => p.recordType === 'ActiveCaloriesBurned'),
+        };
+      }
+
+      // Avoid unsafe native permission dialog unless explicitly enabled.
+      if (!this.shouldPromptAndroidPermissions()) {
         return {
           granted: false,
           workouts: false,
@@ -229,9 +298,22 @@ class HealthService {
     }
 
     if (!this.hasPermissions) {
-      const perms = await this.requestPermissions();
-      if (!perms.granted) {
-        return { success: false, message: 'Health permissions not granted' };
+      if (Platform.OS === 'android') {
+        const existingPermissions = await this.getAndroidGrantedPermissions();
+        this.hasPermissions = existingPermissions.length > 0;
+
+        if (!this.hasPermissions) {
+          return {
+            success: false,
+            message:
+              'Health permissions not granted. Enable Health Connect access from the Progress tab or set EXPO_PUBLIC_ENABLE_HEALTH_CONNECT_PROMPT=true.',
+          };
+        }
+      } else {
+        const perms = await this.requestPermissions();
+        if (!perms.granted) {
+          return { success: false, message: 'Health permissions not granted' };
+        }
       }
     }
 
@@ -371,12 +453,31 @@ class HealthService {
     }
 
     if (!this.hasPermissions) {
-      const perms = await this.requestPermissions();
-      if (!perms.granted) {
-        return {
-          entries: [],
-          result: { success: false, message: 'Health permissions not granted' },
-        };
+      if (Platform.OS === 'android') {
+        const existingPermissions = await this.getAndroidGrantedPermissions();
+        this.hasPermissions = existingPermissions.length > 0;
+
+        if (!this.hasPermissions) {
+          const perms = await this.requestPermissions();
+          if (!perms.granted) {
+            return {
+              entries: [],
+              result: {
+                success: false,
+                message:
+                  'Health permissions not granted. Set EXPO_PUBLIC_ENABLE_HEALTH_CONNECT_PROMPT=true to enable Android permission dialog.',
+              },
+            };
+          }
+        }
+      } else {
+        const perms = await this.requestPermissions();
+        if (!perms.granted) {
+          return {
+            entries: [],
+            result: { success: false, message: 'Health permissions not granted' },
+          };
+        }
       }
     }
 

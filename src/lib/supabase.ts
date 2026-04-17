@@ -1,3 +1,4 @@
+﻿import { showAppAlert } from '@/store/useAlertStore';
 /**
  * Supabase Configuration
  * 
@@ -11,7 +12,7 @@
 import { createClient } from '@supabase/supabase-js';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { AppState, AppStateStatus, Alert } from 'react-native';
+import { AppState, AppStateStatus } from 'react-native';
 import 'react-native-url-polyfill/auto';
 
 // Get environment variables
@@ -20,7 +21,7 @@ const supabaseAnonKey = Constants.expoConfig?.extra?.supabaseAnonKey || process.
 
 if (!supabaseUrl || !supabaseAnonKey) {
   console.warn(
-    '⚠️  Supabase URL or Anon Key not found in environment variables.\n' +
+    'âš ï¸  Supabase URL or Anon Key not found in environment variables.\n' +
     'Make sure to set EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in your .env file.'
   );
 }
@@ -35,11 +36,11 @@ if (!__DEV__ && supabaseUrl) {
   
   if (isLocalUrl) {
     // This is a production build but configured with a local URL!
-    console.error('🚨 CRITICAL: Production build configured with local Supabase URL:', supabaseUrl);
+    console.error('ðŸš¨ CRITICAL: Production build configured with local Supabase URL:', supabaseUrl);
     
     // Show alert to user (will appear on app launch)
     setTimeout(() => {
-      Alert.alert(
+      showAppAlert(
         'Configuration Error',
         'This build is configured with a development URL and cannot connect to the server. Please contact support or reinstall the app.',
         [{ text: 'OK' }]
@@ -63,7 +64,7 @@ const SupabaseStorageAdapter = {
       return value;
     } catch (error) {
       if (__DEV__) {
-        console.error('❌ AsyncStorage getItem error:', key, error);
+        console.error('âŒ AsyncStorage getItem error:', key, error);
       }
       return null;
     }
@@ -73,7 +74,7 @@ const SupabaseStorageAdapter = {
       await AsyncStorage.setItem(key, value);
     } catch (error) {
       if (__DEV__) {
-        console.error('❌ AsyncStorage setItem error:', key, error);
+        console.error('âŒ AsyncStorage setItem error:', key, error);
       }
     }
   },
@@ -82,7 +83,7 @@ const SupabaseStorageAdapter = {
       await AsyncStorage.removeItem(key);
     } catch (error) {
       if (__DEV__) {
-        console.error('❌ AsyncStorage removeItem error:', key, error);
+        console.error('âŒ AsyncStorage removeItem error:', key, error);
       }
     }
   },
@@ -162,6 +163,8 @@ export async function checkSupabaseConnection(): Promise<boolean> {
 
 // Log configuration (helpful for debugging)
 if (__DEV__) {
-  console.log('✅ Supabase client initialized');
+  console.log('âœ… Supabase client initialized');
 }
+
+
 

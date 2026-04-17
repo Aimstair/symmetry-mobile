@@ -7,6 +7,7 @@
  */
 
 import type { WorkoutPlan, WorkoutDay } from '@/types';
+import { formatTitleCaseLabel } from '@/lib/utils';
 
 /**
  * Day status for calendar display
@@ -239,22 +240,6 @@ export function mapWorkoutPlanToWeek(
     const wasCompleted = completedDates?.has(dateString) || false;
     const sessionInfo = completedSessions?.get(dateString);
     
-    // Debug log for today (using local timezone for comparison)
-    const todayYear = today.getFullYear();
-    const todayMonth = String(today.getMonth() + 1).padStart(2, '0');
-    const todayDay = String(today.getDate()).padStart(2, '0');
-    const todayString = `${todayYear}-${todayMonth}-${todayDay}`;
-    if (dateString === todayString && __DEV__) {
-      console.log('📅 Today in calendar:', {
-        date: dateString,
-        dayName,
-        isTrainingDay,
-        wasCompleted,
-        hasCompletedDates: !!completedDates,
-        completedDatesCount: completedDates?.size || 0,
-      });
-    }
-    
     // For past weeks, we don't show the plan template
     // Only show actual completed sessions
     if (isPastWeek) {
@@ -265,7 +250,7 @@ export function mapWorkoutPlanToWeek(
           date: date.getDate(),
           fullDate: date,
           name: sessionInfo.name,
-          muscles: sessionInfo.muscles,
+          muscles: (sessionInfo.muscles || []).map((muscle) => formatTitleCaseLabel(muscle)),
           status: 'completed' as DayStatus,
           exercises: 0, // We don't have exercise count for past sessions
           workoutDay: null,
@@ -351,7 +336,7 @@ export function mapWorkoutPlanToWeek(
       date: date.getDate(),
       fullDate: date,
       name: workoutDay.name,
-      muscles: workoutDay.muscleGroups || [],
+      muscles: (workoutDay.muscleGroups || []).map((muscle) => formatTitleCaseLabel(muscle)),
       status: getDayStatus(date, today, false, completedDates),
       exercises: workoutDay.exercises?.length || 0,
       workoutDay,
@@ -368,23 +353,7 @@ const FULL_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 
 
 export function getFullDayName(date: Date): string {
   const dayIndex = date.getDay();
-  const dayName = FULL_DAY_NAMES[dayIndex];
-  
-  if (__DEV__) {
-    // Use local timezone for date string
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const localDateStr = `${year}-${month}-${day}`;
-    console.log('🗓️ getFullDayName:', {
-      date: localDateStr,
-      dayIndex,
-      dayName,
-      actualDate: date.getDate(),
-    });
-  }
-  
-  return dayName;
+  return FULL_DAY_NAMES[dayIndex];
 }
 
 /**

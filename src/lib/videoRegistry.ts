@@ -2,13 +2,29 @@
 
 /**
  * Exercise Video Registry
- * 
- * Maps exercise IDs to remote video URLs for streaming/caching.
- * Use with useCachedVideo hook for automatic local caching.
- * 
- * Video URLs should point to your CDN or cloud storage.
- * Example: Supabase Storage, AWS S3, Cloudflare R2, etc.
+ *
+ * Supports both bundled local assets and remote CDN URLs.
+ * - Local assets load instantly via require(...)
+ * - Remote URLs can be cached by useCachedVideo
  */
+
+export type ExerciseVideoSource = number | string;
+
+/**
+ * Normalize keys for resilient lookup.
+ * Examples: "Bench Press" -> "bench_press", "bench-press" -> "bench_press"
+ */
+const normalizeVideoKey = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+// Bundled local exercise videos that ship with the app.
+const localExerciseVideoRegistry: Record<string, number> = {
+  bench_press: require('../../assets/video/exercises/bench-press.mp4'),
+};
 
 // Base URL for video storage (update with your CDN/storage URL)
 const VIDEO_BASE_URL = 'https://your-cdn.com/exercise-videos';
@@ -76,11 +92,22 @@ export const exerciseVideoRegistry: Record<string, string> = {
 };
 
 /**
- * Get video URL for an exercise
- * Returns null if no video is registered for the exercise
+ * Get video source for an exercise key or name.
+ * Returns local asset (number) or remote URL (string), or null when missing.
  */
-export const getVideoForExercise = (exerciseId: string): string | null => {
-  return exerciseVideoRegistry[exerciseId] || null;
+export const getVideoForExercise = (exerciseId: string): ExerciseVideoSource | null => {
+  const exactLocal = localExerciseVideoRegistry[exerciseId];
+  if (exactLocal) return exactLocal;
+
+  const exactRemote = exerciseVideoRegistry[exerciseId];
+  if (exactRemote) return exactRemote;
+
+  const normalized = normalizeVideoKey(exerciseId);
+
+  const normalizedLocal = localExerciseVideoRegistry[normalized];
+  if (normalizedLocal) return normalizedLocal;
+
+  return exerciseVideoRegistry[normalized] || null;
 };
 
 /**
@@ -94,5 +121,5 @@ export const getAllVideoUrls = (): string[] => {
  * Check if an exercise has a video
  */
 export const hasVideo = (exerciseId: string): boolean => {
-  return exerciseId in exerciseVideoRegistry;
+  return getVideoForExercise(exerciseId) !== null;
 };

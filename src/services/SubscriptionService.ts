@@ -11,7 +11,7 @@
  * - Subscription management
  */
 
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import Purchases, {
   PurchasesPackage,
   CustomerInfo,
@@ -414,6 +414,31 @@ class SubscriptionService {
       : REVENUECAT_GOOGLE_API_KEY;
     
     return !apiKey.startsWith('YOUR_');
+  }
+
+  /**
+   * Open native store subscription management.
+   * Users can manage or cancel their subscription here.
+   */
+  async openManageSubscriptionSettings(): Promise<boolean> {
+    const url = Platform.OS === 'ios'
+      ? 'https://apps.apple.com/account/subscriptions'
+      : 'https://play.google.com/store/account/subscriptions';
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        return false;
+      }
+
+      await Linking.openURL(url);
+      addBreadcrumb('Opened subscription management', 'user-action', { platform: Platform.OS });
+      return true;
+    } catch (error) {
+      console.error('❌ Failed to open subscription management:', error);
+      addBreadcrumb('Open subscription management failed', 'user-action', { error: String(error) }, 'error');
+      return false;
+    }
   }
 }
 

@@ -7,10 +7,10 @@
 
 import { useState, useEffect } from 'react';
 import * as FileSystem from 'expo-file-system';
-import * as Crypto from 'expo-crypto';
 
 // Cache directory for videos
 const VIDEO_CACHE_DIR = `${FileSystem.cacheDirectory}exercise-videos/`;
+const inFlightDownloads = new Map<string, Promise<string | null>>();
 
 /**
  * Generate a consistent filename from a URL
@@ -54,25 +54,45 @@ async function getCachedVideoPath(url: string): Promise<string | null> {
  * Download video to cache
  */
 async function cacheVideo(url: string): Promise<string | null> {
-  await ensureCacheDirectory();
-  
-  const filename = getFilenameFromUrl(url);
-  const localPath = `${VIDEO_CACHE_DIR}${filename}`;
-  
-  try {
-    const downloadResult = await FileSystem.downloadAsync(url, localPath);
-    
-    if (downloadResult.status === 200) {
-      if (__DEV__) {
-        console.log('📹 Video cached successfully:', filename);
-      }
-      return downloadResult.uri;
-    }
-  } catch (error) {
-    console.error('Error caching video:', error);
+  const existingDownload = inFlightDownloads.get(url);
+  if (existingDownload) {
+    return existingDownload;
   }
-  
-  return null;
+
+  await ensureCacheDirectory();
+
+  const downloadPromise = (async () => {
+    const filename = getFilenameFromUrl(url);
+    const localPath = `${VIDEO_CACHE_DIR}${filename}`;
+
+    try {
+      const localInfo = await FileSystem.getInfoAsync(localPath);
+      if (localInfo.exists) {
+        return localPath;
+      }
+
+      const downloadResult = await FileSystem.downloadAsync(url, localPath);
+
+      if (downloadResult.status === 200) {
+        if (__DEV__) {
+          console.log('📹 Video cached successfully:', filename);
+        }
+        return downloadResult.uri;
+      }
+    } catch (error) {
+      console.error('Error caching video:', error);
+    }
+
+    return null;
+  })();
+
+  inFlightDownloads.set(url, downloadPromise);
+
+  try {
+    return await downloadPromise;
+  } finally {
+    inFlightDownloads.delete(url);
+  }
 }
 
 /**
@@ -96,18 +116,18 @@ export async function getVideoCacheSize(): Promise<number> {
   try {
     const dirInfo = await FileSystem.getInfoAsync(VIDEO_CACHE_DIR);
     if (!dirInfo.exists) return 0;
-    
+
     const files = await FileSystem.readDirectoryAsync(VIDEO_CACHE_DIR);
-    let totalSize = 0;
-    
-    for (const file of files) {
-      const fileInfo = await FileSystem.getInfoAsync(`${VIDEO_CACHE_DIR}${file}`);
-      if (fileInfo.exists && 'size' in fileInfo) {
-        totalSize += fileInfo.size || 0;
+    const fileInfos = await Promise.all(
+      files.map((file) => FileSystem.getInfoAsync(`${VIDEO_CACHE_DIR}${file}`))
+    );
+
+    return fileInfos.reduce((total, fileInfo) => {
+      if (!fileInfo.exists || !('size' in fileInfo) || !fileInfo.size) {
+        return total;
       }
-    }
-    
-    return totalSize;
+      return total + fileInfo.size;
+    }, 0);
   } catch (error) {
     console.error('Error getting cache size:', error);
     return 0;
@@ -200,16 +220,10 @@ export function useCachedVideo(remoteUrl: string | null | undefined): {
  */
 export async function preloadVideos(urls: string[]): Promise<void> {
   await ensureCacheDirectory();
-  
-  const uncachedUrls: string[] = [];
-  
-  // Check which videos need to be cached
-  for (const url of urls) {
-    const cached = await getCachedVideoPath(url);
-    if (!cached) {
-      uncachedUrls.push(url);
-    }
-  }
+
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+  const cachedPaths = await Promise.all(uniqueUrls.map((url) => getCachedVideoPath(url)));
+  const uncachedUrls = uniqueUrls.filter((_, index) => !cachedPaths[index]);
   
   if (__DEV__ && uncachedUrls.length > 0) {
     console.log(`📹 Preloading ${uncachedUrls.length} videos...`);

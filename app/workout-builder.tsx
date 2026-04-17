@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useExercises } from '@/hooks/useExercises';
 import { ChevronLeft, Plus, X, Check, Search, Link, Unlink } from 'lucide-react-native';
-import { cn } from '@/lib/utils';
+import { cn, formatExerciseDisplayName, formatMuscleGroups } from '@/lib/utils';
 import type { WorkoutPlan, WorkoutDay, PlanExercise, CatalogExercise } from '@/types';
 
 interface SelectedExercise {
@@ -450,7 +450,7 @@ export default function WorkoutBuilder() {
                             <View className="flex-1">
                               <View className="flex-row items-center gap-2">
                                 <Text className="font-medium text-sm text-foreground">
-                                  {details?.name || ex.exerciseId}
+                                  {details?.name || formatExerciseDisplayName(ex.exerciseId)}
                                 </Text>
                                 {hasSuperset && (
                                   <View 
@@ -462,7 +462,7 @@ export default function WorkoutBuilder() {
                                 )}
                               </View>
                               <Text className="text-xs text-muted-foreground">
-                                {details?.muscleGroups.join(' • ')}
+                                {details?.muscleGroups ? formatMuscleGroups(details.muscleGroups) : ''}
                               </Text>
                             </View>
                             
@@ -604,7 +604,7 @@ export default function WorkoutBuilder() {
                           <View className="flex-1 mr-3">
                             <Text className="font-medium text-foreground">{exercise.name}</Text>
                             <Text className="text-xs text-muted-foreground mt-1">
-                              {exercise.muscleGroups.join(' • ')}
+                              {formatMuscleGroups(exercise.muscleGroups)}
                             </Text>
                           </View>
                           {isSelected && <Check size={20} color="#4ADE80" />}

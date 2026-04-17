@@ -1,6 +1,6 @@
-import * as React from 'react';
+﻿import * as React from 'react';
 import { useState } from 'react';
-import { View, Text, ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Pressable } from 'react-native';
+import { View, Text, ScrollView, KeyboardAvoidingView, Platform,  ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, Link } from 'expo-router'; // Combined import
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -18,6 +18,7 @@ import {
   Shield,
   Sparkles,
 } from 'lucide-react-native';
+import { showAppAlert } from '@/store/useAlertStore';
 import { cn } from '@/lib/utils';
 import { convert } from '@/lib/utils';
 import { useAppStore } from '@/store/useAppStore';
@@ -130,6 +131,7 @@ export default function Onboarding() {
           trainingDays: formData.selectedDays, // Save selected training days
           createdAt: new Date(),
           updatedAt: new Date(),
+          workoutsCompleted: 0,
         };
 
         // Calculate nutrition targets using metric values
@@ -145,8 +147,8 @@ export default function Onboarding() {
         );
 
         if (__DEV__) {
-          console.log('🍎 Calculated Nutrition:', nutritionTargets);
-          console.log('👤 Guest user created:', guestId);
+          console.log('ðŸŽ Calculated Nutrition:', nutritionTargets);
+          console.log('ðŸ‘¤ Guest user created:', guestId);
         }
 
         // Save locally only (no cloud sync for guests)
@@ -169,14 +171,14 @@ export default function Onboarding() {
         completeOnboarding();
 
         if (__DEV__) {
-          console.log('🎉 Onboarding completed for guest:', guestId);
+          console.log('ðŸŽ‰ Onboarding completed for guest:', guestId);
         }
 
         // Navigate to paywall after onboarding
         router.push('/paywall?onboarding=true');
       } catch (error: any) {
-        console.error('❌ Error saving user profile:', error);
-        Alert.alert(
+        console.error('âŒ Error saving user profile:', error);
+        showAppAlert(
           'Error',
           error.message || 'Failed to save your profile. Please try again.'
         );
@@ -687,3 +689,4 @@ export default function Onboarding() {
     </SafeAreaView>
   );
 }
+

@@ -204,6 +204,7 @@ export function useExerciseCacheMetadata() {
  */
 let exerciseLookupCache: Map<string, CatalogExercise> = new Map();
 let lookupCacheInitialized = false;
+let lookupCacheInitPromise: Promise<void> | null = null;
 
 /**
  * Initialize the lookup cache (call once on app start)
@@ -211,21 +212,33 @@ let lookupCacheInitialized = false;
 export async function initializeExerciseLookup(): Promise<void> {
   if (lookupCacheInitialized) return;
 
-  try {
-    const exercises = await cloudService.exercise.getExercises();
-    exerciseLookupCache.clear();
-
-    exercises.forEach((ex) => {
-      // Store by ID
-      exerciseLookupCache.set(ex.id, ex);
-      // Store by name (lowercase for case-insensitive lookup)
-      exerciseLookupCache.set(ex.name.toLowerCase(), ex);
-    });
-
-    lookupCacheInitialized = true;
-  } catch (err) {
-    console.error('Failed to initialize exercise lookup:', err);
+  if (lookupCacheInitPromise) {
+    await lookupCacheInitPromise;
+    return;
   }
+
+  lookupCacheInitPromise = (async () => {
+    try {
+      const exercises = await cloudService.exercise.getExercises();
+      exerciseLookupCache.clear();
+
+      exercises.forEach((ex) => {
+        // Store by ID
+        exerciseLookupCache.set(ex.id, ex);
+        // Store by name (lowercase for case-insensitive lookup)
+        exerciseLookupCache.set(ex.name.toLowerCase(), ex);
+      });
+
+      lookupCacheInitialized = true;
+    } catch (err) {
+      console.error('Failed to initialize exercise lookup:', err);
+      throw err;
+    } finally {
+      lookupCacheInitPromise = null;
+    }
+  })();
+
+  await lookupCacheInitPromise;
 }
 
 /**

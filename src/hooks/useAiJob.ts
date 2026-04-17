@@ -19,6 +19,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
+import { notificationService } from '@/services/NotificationService';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 // ============================================================================
@@ -157,6 +158,7 @@ export function useAiJob(options: UseAiJobOptions = {}): UseAiJobReturn {
 
         if (job.status === 'completed' && job.result_json) {
           setResult(job.result_json);
+          await notificationService.scheduleAiCompletionFallback({ jobId: id, delaySeconds: 1 });
           cleanup();
           onComplete?.(job.result_json);
           return true; // Job finished
@@ -237,6 +239,7 @@ export function useAiJob(options: UseAiJobOptions = {}): UseAiJobReturn {
 
           if (newRecord.status === 'completed' && newRecord.result_json) {
             setResult(newRecord.result_json);
+            void notificationService.scheduleAiCompletionFallback({ jobId: id, delaySeconds: 1 });
             cleanup();
             onComplete?.(newRecord.result_json);
           }

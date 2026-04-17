@@ -24,7 +24,7 @@ export default {
     splash: {
       image: './assets/icon.png',
       resizeMode: 'contain',
-      backgroundColor: '#000000',
+      backgroundColor: '#0A0A0F',
     },
     assetBundlePatterns: ['**/*'],
     ios: {
@@ -35,6 +35,7 @@ export default {
       infoPlist: {
         NSCameraUsageDescription: "We need camera access for physique scanning and progress photos.",
         NSPhotoLibraryUsageDescription: "We need photo library access to save your progress photos.",
+        NSPhotoLibraryAddUsageDescription: "We need photo library access to save your workout summary cards.",
         UIBackgroundModes: ["audio"]
       },
     },
@@ -44,7 +45,7 @@ export default {
         backgroundColor: '#0A0A0F',
       },
       package: 'com.symmetry.fitness',
-      versionCode: 3,
+      versionCode: 4,
       newArchEnabled: true,
       permissions: [
         "CAMERA",
@@ -72,6 +73,11 @@ export default {
       'expo-router',
       'expo-apple-authentication',
       
+      // Health Connect Plugin (fixes UninitializedPropertyAccessException crash)
+      ['react-native-health-connect', {
+        rationaleActivityName: 'Activity',
+      }],
+      
       // Camera Plugin (Ported from app.json)
       [
         "expo-camera",
@@ -88,6 +94,14 @@ export default {
         }
       ],
 
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Symmetry to access your photos for sharing and progress tracking.",
+          "savePhotosPermission": "Allow Symmetry to save workout summary cards to your photo library."
+        }
+      ],
+
       // Build Properties (FIXES THE GOOGLE PLAY API 35 ERROR)
       [
         "expo-build-properties",
@@ -95,7 +109,10 @@ export default {
           android: {
             compileSdkVersion: 35,
             targetSdkVersion: 35,
-            buildToolsVersion: "35.0.0"
+            buildToolsVersion: "35.0.0",
+            "minSdkVersion": 26, 
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true
           },
           ios: {
             deploymentTarget: "15.1"

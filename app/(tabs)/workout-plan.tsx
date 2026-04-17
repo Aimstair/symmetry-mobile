@@ -1,14 +1,17 @@
-import { useState, useRef, useCallback, useMemo } from 'react';
+﻿import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import * as React from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated, ActivityIndicator, Alert, InteractionManager } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, ScrollView, Pressable, Animated, InteractionManager } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ActiveDayModal } from '@/components/ui/workout/ActiveDayModal';
 import { SwapExerciseModal } from '@/components/ui/workout/SwapExerciseModal';
 import { AddExerciseModal } from '@/components/ui/workout/AddExerciseModal';
+import { ShareModal } from '@/components/ui/workout/ShareModal';
+import type { WorkoutSummaryData } from '@/components/ui/workout/WorkoutSummaryCard';
 import {
   ChevronLeft,
   ChevronRight,
@@ -24,9 +27,20 @@ import {
   Plus,
   Pause,
   Play,
+  Share2,
+  Trash2,
 } from 'lucide-react-native';
-import { useRouter } from 'expo-router';
-import { cn } from '@/lib/utils';
+import { showAppAlert } from '@/store/useAlertStore';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import {
+  cn,
+  DEFAULT_FRESHNESS_WINDOW_MS,
+  formatExerciseDisplayName,
+  formatMuscleGroups,
+  formatWorkoutDuration,
+  isStaleTimestamp,
+} from '@/lib/utils';
+import { calculateWorkoutStreak, getSymmetryScoreForDate } from '@/utils/workoutMetrics';
 import { useAppStore } from '@/store/useAppStore';
 import { getExerciseInfo } from '@/hooks/useExercises';
 import {
@@ -38,10 +52,28 @@ import {
   normalizeDayName,
 } from '@/utils/workoutCalendar';
 import { generateSingleDayWorkout } from '@/utils/aiPlanner';
+import { useConsumeSessionAnimation } from '@/hooks/useSessionAnimationGate';
 import type { WorkoutDay, PlanExercise } from '@/types';
+
+const getBackendRank = (source: unknown): number | undefined => {
+  if (!source || typeof source !== 'object') return undefined;
+
+  const record = source as Record<string, unknown>;
+  const candidates = [record.rank, record.countryRank, record.dailyCountryRank];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+      return Math.floor(candidate);
+    }
+  }
+
+  return undefined;
+};
 
 export default function WorkoutPlanScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ postWorkoutShare?: string }>();
+  const insets = useSafeAreaInsets();
 
   // Store selectors
   const workoutPlans = useAppStore((s) => s.workoutPlans);
@@ -49,18 +81,22 @@ export default function WorkoutPlanScreen() {
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const isLoading = useAppStore((s) => s.isLoading);
   const workoutHistory = useAppStore((s) => s.workoutHistory);
+  const unit = useAppStore((s) => s.settings.unit);
+  const activeWorkout = useAppStore((s) => s.activeWorkout);
 
   // Store actions for day toggling
   const syncUpdateUserToCloud = useAppStore((s) => s.syncUpdateUserToCloud);
   const syncAddWorkoutDayToCloud = useAppStore((s) => s.syncAddWorkoutDayToCloud);
   const syncRemoveWorkoutDayFromCloud = useAppStore((s) => s.syncRemoveWorkoutDayFromCloud);
   const syncAddExerciseToDayCloud = useAppStore((s) => s.syncAddExerciseToDayCloud);
+  const syncRemoveExerciseFromDayCloud = useAppStore((s) => s.syncRemoveExerciseFromDayCloud);
+  const syncSwapExerciseToCloud = useAppStore((s) => s.syncSwapExerciseToCloud);
   const startWorkout = useAppStore((s) => s.startWorkout);
   const syncFetchWorkoutHistory = useAppStore((s) => s.syncFetchWorkoutHistory);
 
   // Get user's training days (from onboarding)
   const trainingDays = useMemo(() => {
-    return user?.trainingDays || [];
+    return Array.isArray(user?.trainingDays) ? user.trainingDays : [];
   }, [user]);
 
   // Get the active workout plan (first one for now, could add selection logic)
@@ -82,11 +118,26 @@ export default function WorkoutPlanScreen() {
   // Fetch workout history when screen loads
   useFocusEffect(
     useCallback(() => {
+      if (historyFetchInFlightRef.current) {
+        return;
+      }
+
+      if (!isStaleTimestamp(lastHistoryFetchAtRef.current, DEFAULT_FRESHNESS_WINDOW_MS)) {
+        return;
+      }
+
+      historyFetchInFlightRef.current = true;
       const task = InteractionManager.runAfterInteractions(() => {
-        syncFetchWorkoutHistory();
+        Promise.resolve(syncFetchWorkoutHistory({ force: false })).finally(() => {
+          historyFetchInFlightRef.current = false;
+          lastHistoryFetchAtRef.current = Date.now();
+        });
       });
 
-      return () => task.cancel(); // Cleanup if we leave before it runs
+      return () => {
+        task.cancel();
+        historyFetchInFlightRef.current = false;
+      };
     }, [syncFetchWorkoutHistory])
   );
 
@@ -94,25 +145,19 @@ export default function WorkoutPlanScreen() {
   const completedDates = useMemo(() => {
     const dates = new Set<string>();
     workoutHistory.forEach((session: any) => {
-      if (session.startedAt) {
-        // Convert to local date string (YYYY-MM-DD) to avoid UTC timezone shift
-        const date = new Date(session.startedAt);
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-        const dateStr = `${year}-${month}-${day}`;
-        dates.add(dateStr);
-      }
+      if (!session?.startedAt) return;
+
+      // Convert to local date string (YYYY-MM-DD) to avoid UTC timezone shift
+      const date = new Date(session.startedAt);
+      if (Number.isNaN(date.getTime())) return;
+
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const dateStr = `${year}-${month}-${day}`;
+      dates.add(dateStr);
     });
-    
-    if (__DEV__) {
-      console.log('📅 Completed dates calculated:', Array.from(dates));
-      console.log('📅 Total workout history sessions:', workoutHistory.length);
-      const today = new Date();
-      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-      console.log('📅 Is today completed?', dates.has(todayStr));
-    }
-    
+
     return dates;
   }, [workoutHistory]);
 
@@ -132,6 +177,7 @@ export default function WorkoutPlanScreen() {
   const [swapDialogOpen, setSwapDialogOpen] = useState(false);
   const [exerciseToSwap, setExerciseToSwap] = useState<string | null>(null);
   const [exerciseToSwapId, setExerciseToSwapId] = useState<string | null>(null);
+  const [exerciseToSwapPlanExerciseId, setExerciseToSwapPlanExerciseId] = useState<string | null>(null);
   const [swappedExercises, setSwappedExercises] = useState<Record<string, string>>({});
   
   // Active Day Modal state
@@ -140,19 +186,50 @@ export default function WorkoutPlanScreen() {
   
   // Add Exercise Modal state
   const [showAddExerciseModal, setShowAddExerciseModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shareWorkoutData, setShareWorkoutData] = useState<WorkoutSummaryData | null>(null);
+  const hasConsumedPostWorkoutShareRef = useRef(false);
 
   // Animation refs
   const headerAnim = useRef(new Animated.Value(0)).current;
   const calendarAnim = useRef(new Animated.Value(0)).current;
   const contentAnim = useRef(new Animated.Value(0)).current;
+  const historyFetchInFlightRef = useRef(false);
+  const lastHistoryFetchAtRef = useRef(0);
+  const animationInFlightRef = useRef<Animated.CompositeAnimation | null>(null);
+  const consumeEntryAnimation = useConsumeSessionAnimation('tabs-workout-plan');
 
   // Reset selected day when week changes
   useFocusEffect(
     useCallback(() => {
+      const shouldAnimateEntry = consumeEntryAnimation();
+
+      if (!shouldAnimateEntry) {
+        if (animationInFlightRef.current) {
+          animationInFlightRef.current.stop();
+          animationInFlightRef.current = null;
+        }
+
+        headerAnim.setValue(1);
+        calendarAnim.setValue(1);
+        contentAnim.setValue(1);
+
+        return () => {
+          if (animationInFlightRef.current) {
+            animationInFlightRef.current.stop();
+            animationInFlightRef.current = null;
+          }
+        };
+      }
+
       // Reset values
       headerAnim.setValue(0);
       calendarAnim.setValue(0);
       contentAnim.setValue(0);
+
+      if (animationInFlightRef.current) {
+        animationInFlightRef.current.stop();
+      }
       
       // Create animation composition
       const animation = Animated.stagger(80, [
@@ -162,13 +239,21 @@ export default function WorkoutPlanScreen() {
       ]);
 
       // Start
-      animation.start();
+      animationInFlightRef.current = animation;
+      animation.start(() => {
+        if (animationInFlightRef.current === animation) {
+          animationInFlightRef.current = null;
+        }
+      });
 
       // CLEANUP: Stop animation if user navigates away before it finishes
       return () => {
         animation.stop();
+        if (animationInFlightRef.current === animation) {
+          animationInFlightRef.current = null;
+        }
       };
-    }, []) 
+    }, [consumeEntryAnimation])
   );
 
   const createAnimStyle = (anim: Animated.Value) => ({
@@ -194,7 +279,7 @@ export default function WorkoutPlanScreen() {
   // Handler: Confirm active day creation from modal
   const handleConfirmActiveDay = useCallback(async (workoutName: string, muscleGroups: string[]) => {
     if (!user || !activePlan) {
-      Alert.alert('Error', 'User or workout plan not found');
+      showAppAlert('Error', 'User or workout plan not found');
       return;
     }
     
@@ -210,15 +295,15 @@ export default function WorkoutPlanScreen() {
         : [...normalizedExisting, dayName];
       
       if (__DEV__) {
-        console.log('📅 Activating day:', dayName);
-        console.log('📅 New training days:', newTrainingDays);
+        console.log('ðŸ“… Activating day:', dayName);
+        console.log('ðŸ“… New training days:', newTrainingDays);
       }
       
       // Update user's training days and WAIT for store to update
       const updatedUser = await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
       
       if (__DEV__) {
-        console.log('📅 User updated with training days:', updatedUser?.trainingDays);
+        console.log('ðŸ“… User updated with training days:', updatedUser?.trainingDays);
       }
 
       // Create a new workout day with the selected muscle groups (no exercises yet)
@@ -244,7 +329,7 @@ export default function WorkoutPlanScreen() {
       await syncAddWorkoutDayToCloud(activePlan.id, newWorkoutDay);
       
       if (__DEV__) {
-        console.log('📅 Workout day created:', newWorkoutDay.name, 'for', dayName);
+        console.log('ðŸ“… Workout day created:', newWorkoutDay.name, 'for', dayName);
       }
       
       // Close modal and reset state after successful operation
@@ -253,11 +338,11 @@ export default function WorkoutPlanScreen() {
       
       // Show success alert
       setTimeout(() => {
-        Alert.alert('Day Activated', `${dayName} is now an active training day! Add exercises from the workout screen.`);
+        showAppAlert('Day Activated', `${dayName} is now an active training day! Add exercises from the workout screen.`);
       }, 100);
     } catch (error) {
       console.error('Failed to make active day:', error);
-      Alert.alert('Error', 'Failed to activate day. Please try again.');
+      showAppAlert('Error', 'Failed to activate day. Please try again.');
       // Don't close modal on error so user can retry
       throw error; // Re-throw to let modal know there was an error
     }
@@ -270,7 +355,7 @@ export default function WorkoutPlanScreen() {
     // Normalize the day name for consistent comparison
     const normalizedDayName = normalizeDayName(dayName);
 
-    Alert.alert(
+    showAppAlert(
       'Rest Day',
       `Make ${normalizedDayName} a rest day? The scheduled workout will be removed.`,
       [
@@ -287,8 +372,8 @@ export default function WorkoutPlanScreen() {
               );
               
               if (__DEV__) {
-                console.log('📅 Removing day:', normalizedDayName);
-                console.log('📅 New training days:', newTrainingDays);
+                console.log('ðŸ“… Removing day:', normalizedDayName);
+                console.log('ðŸ“… New training days:', newTrainingDays);
               }
               
               await syncUpdateUserToCloud(user.id, { trainingDays: newTrainingDays });
@@ -298,10 +383,10 @@ export default function WorkoutPlanScreen() {
                 await syncRemoveWorkoutDayFromCloud(activePlan.id, workoutDayId);
               }
 
-              Alert.alert('Rest Day Set', `${normalizedDayName} is now a rest day.`);
+              showAppAlert('Rest Day Set', `${normalizedDayName} is now a rest day.`);
             } catch (error) {
               console.error('Failed to make rest day:', error);
-              Alert.alert('Error', 'Failed to set rest day. Please try again.');
+              showAppAlert('Error', 'Failed to set rest day. Please try again.');
             }
           },
         },
@@ -310,7 +395,15 @@ export default function WorkoutPlanScreen() {
   }, [user, activePlan, trainingDays, syncUpdateUserToCloud, syncRemoveWorkoutDayFromCloud]);
 
   // Get the selected workout for the day
-  const selectedWorkout = calendarDays[selectedDay];
+  const selectedWorkout = calendarDays[selectedDay] ?? calendarDays[0] ?? null;
+
+  if (!selectedWorkout) {
+    return (
+      <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
+        <Text className="text-muted-foreground">No calendar data available.</Text>
+      </SafeAreaView>
+    );
+  }
 
   // Get exercises for the selected day
   const dayExercises = useMemo(() => {
@@ -320,51 +413,185 @@ export default function WorkoutPlanScreen() {
     return selectedWorkout.workoutDay.exercises;
   }, [selectedWorkout]);
 
-  // Get actual completed session data for the selected day
-  const completedSessionData = useMemo(() => {
+  const handleRemoveExerciseFromPlan = useCallback((exercise: PlanExercise) => {
+    if (!activePlan || !selectedWorkout?.workoutDay) return;
+
+    const exerciseName = exercise.exercise?.name || formatExerciseDisplayName(exercise.exerciseId);
+
+    showAppAlert(
+      'Remove Exercise',
+      `Remove ${exerciseName} from this workout day?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await syncRemoveExerciseFromDayCloud(activePlan.id, selectedWorkout.workoutDay!.id, exercise.id);
+              showAppAlert('Exercise Removed', `${exerciseName} has been removed.`);
+            } catch (error) {
+              console.error('Failed to remove exercise:', error);
+              showAppAlert('Error', 'Failed to remove exercise. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [activePlan, selectedWorkout, syncRemoveExerciseFromDayCloud]);
+
+  const completedSession = useMemo(() => {
     if (selectedWorkout?.status !== 'completed') return null;
-    
-    // Find session for this specific date
+
     const year = selectedWorkout.fullDate.getFullYear();
     const month = String(selectedWorkout.fullDate.getMonth() + 1).padStart(2, '0');
     const day = String(selectedWorkout.fullDate.getDate()).padStart(2, '0');
     const dateStr = `${year}-${month}-${day}`;
-    
-    const session = workoutHistory.find((s: any) => {
-      if (s.startedAt) {
-        const sessionDate = new Date(s.startedAt);
-        const sessionYear = sessionDate.getFullYear();
-        const sessionMonth = String(sessionDate.getMonth() + 1).padStart(2, '0');
-        const sessionDay = String(sessionDate.getDate()).padStart(2, '0');
-        const sessionDateStr = `${sessionYear}-${sessionMonth}-${sessionDay}`;
-        return sessionDateStr === dateStr;
-      }
-      return false;
+
+    const sessionsForDay = workoutHistory.filter((s: any) => {
+      if (!s.startedAt) return false;
+
+      const sessionDate = new Date(s.startedAt);
+      if (Number.isNaN(sessionDate.getTime())) return false;
+
+      const sessionYear = sessionDate.getFullYear();
+      const sessionMonth = String(sessionDate.getMonth() + 1).padStart(2, '0');
+      const sessionDay = String(sessionDate.getDate()).padStart(2, '0');
+      const sessionDateStr = `${sessionYear}-${sessionMonth}-${sessionDay}`;
+      return sessionDateStr === dateStr;
     });
-    
-    if (!session) return null;
-    
-    // Calculate stats from actual session
-    const totalSets = session.exercises?.reduce((sum: number, ex: any) => sum + (ex.sets?.length || 0), 0) || 0;
-    const totalVolume = session.exercises?.reduce((sum: number, ex: any) => {
+
+    if (sessionsForDay.length === 0) return null;
+
+    return sessionsForDay.sort((a: any, b: any) => {
+      const aTime = new Date(a.endedAt || a.startedAt || a.createdAt || 0).getTime();
+      const bTime = new Date(b.endedAt || b.startedAt || b.createdAt || 0).getTime();
+      return bTime - aTime;
+    })[0];
+  }, [selectedWorkout, workoutHistory]);
+
+  const completedSessionData = useMemo(() => {
+    if (!completedSession) return null;
+
+    const totalSets = completedSession.exercises?.reduce((sum: number, ex: any) => sum + (ex.sets?.length || 0), 0) || 0;
+    const totalVolume = completedSession.exercises?.reduce((sum: number, ex: any) => {
       return sum + (ex.sets?.reduce((setSum: number, set: any) => {
         return setSum + ((set.weight || 0) * (set.reps || 0));
       }, 0) || 0);
     }, 0) || 0;
-    
-    const durationSeconds = session.durationSeconds || 
-      (session.endedAt && session.startedAt ? 
-        Math.floor((new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()) / 1000) : 0);
-    
-    const durationMinutes = Math.floor(durationSeconds / 60);
-    const durationDisplay = durationMinutes > 0 ? `${durationMinutes} min` : '--';
-    
+
+    const durationSeconds = completedSession.durationSeconds ||
+      (completedSession.endedAt && completedSession.startedAt
+        ? Math.floor((new Date(completedSession.endedAt).getTime() - new Date(completedSession.startedAt).getTime()) / 1000)
+        : 0);
+
     return {
-      duration: durationDisplay,
+      durationSeconds,
+      duration: formatWorkoutDuration(durationSeconds),
       sets: totalSets,
+      totalVolume,
       volume: totalVolume > 0 ? Math.round(totalVolume).toLocaleString() : '--',
     };
-  }, [selectedWorkout, workoutHistory]);
+  }, [completedSession]);
+
+  const selectedWorkoutStreak = useMemo(() => {
+    return calculateWorkoutStreak(
+      workoutHistory.map((session) => session?.startedAt),
+      selectedWorkout?.fullDate
+    );
+  }, [workoutHistory, selectedWorkout?.fullDate]);
+
+  const selectedWorkoutSymmetryScore = useMemo(() => {
+    return getSymmetryScoreForDate(physiqueScans, selectedWorkout?.fullDate);
+  }, [physiqueScans, selectedWorkout?.fullDate]);
+
+  const openCompletedSummary = useCallback(() => {
+    if (!completedSessionData || !selectedWorkout) return;
+
+    const sessionRank = getBackendRank(completedSession);
+
+    const reportItems = (completedSession?.exercises || [])
+      .map((exercise: any) => {
+        const sets = exercise?.sets || [];
+        if (sets.length === 0) {
+          return null;
+        }
+
+        const volume = sets.reduce((sum: number, set: any) => {
+          const weight = Number(set?.weight) || 0;
+          const reps = Number(set?.reps) || 0;
+          return sum + weight * reps;
+        }, 0);
+
+        const exerciseName =
+          exercise?.exercise?.name ||
+          exercise?.name ||
+          formatExerciseDisplayName(String(exercise?.exerciseId || exercise?.id || 'Exercise'));
+
+        return {
+          label: exerciseName,
+          value: `${sets.length} sets • ${Math.round(volume).toLocaleString()} ${unit}`,
+        };
+      })
+      .filter(Boolean) as Array<{ label: string; value: string }>;
+
+    const exerciseSummary =
+      reportItems.length > 0
+        ? `${reportItems.length} exercise${reportItems.length === 1 ? '' : 's'} done`
+        : `${completedSessionData.sets} sets done`;
+
+    setShareWorkoutData({
+      workoutName: selectedWorkout.name || 'Workout Session',
+      duration: completedSessionData.durationSeconds,
+      totalVolume: Math.round(completedSessionData.totalVolume),
+      completedSets: completedSessionData.sets,
+      prs: 0,
+      rank: sessionRank,
+      date: selectedWorkout.fullDate || new Date(),
+      streakDays: selectedWorkoutStreak,
+      symmetryScore: selectedWorkoutSymmetryScore ?? undefined,
+      reportItems,
+      exerciseSummary,
+    });
+    setShowShareModal(true);
+  }, [
+    completedSession,
+    completedSessionData,
+    selectedWorkout,
+    selectedWorkoutStreak,
+    selectedWorkoutSymmetryScore,
+    unit,
+  ]);
+
+  useEffect(() => {
+    if (params.postWorkoutShare === '1') {
+      hasConsumedPostWorkoutShareRef.current = false;
+      const today = findTodayIndex(calendarDays);
+      if (today >= 0) {
+        setSelectedDay(today);
+      }
+      return;
+    }
+
+    hasConsumedPostWorkoutShareRef.current = false;
+  }, [params.postWorkoutShare, calendarDays]);
+
+  useEffect(() => {
+    if (params.postWorkoutShare !== '1') return;
+    if (hasConsumedPostWorkoutShareRef.current) return;
+    if (!selectedWorkout || selectedWorkout.status !== 'completed') return;
+    if (!completedSessionData) return;
+
+    hasConsumedPostWorkoutShareRef.current = true;
+    openCompletedSummary();
+    router.replace('/(tabs)/workout-plan');
+  }, [
+    params.postWorkoutShare,
+    selectedWorkout,
+    completedSessionData,
+    openCompletedSummary,
+    router,
+  ]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -398,12 +625,67 @@ export default function WorkoutPlanScreen() {
     }
   };
 
+  const isSelectedWorkoutToday = useMemo(() => {
+    const today = new Date();
+    return (
+      selectedWorkout.fullDate.getFullYear() === today.getFullYear() &&
+      selectedWorkout.fullDate.getMonth() === today.getMonth() &&
+      selectedWorkout.fullDate.getDate() === today.getDate()
+    );
+  }, [selectedWorkout.fullDate]);
+
+  const isCompletedToday = selectedWorkout.status === 'completed' && isSelectedWorkoutToday;
+  const canStartWorkout = selectedWorkout.status === 'today' || isCompletedToday;
+  const isContinuingWorkout =
+    canStartWorkout &&
+    activeWorkout.isActive &&
+    Boolean(activePlan?.id) &&
+    activeWorkout.workoutId === activePlan?.id;
+  const handleStartOrContinueWorkout = useCallback(() => {
+    if (!activePlan?.id) return;
+
+    if (!isContinuingWorkout) {
+      startWorkout(activePlan.id);
+    }
+
+    InteractionManager.runAfterInteractions(() => {
+      router.replace('/active-workout');
+    });
+  }, [activePlan?.id, isContinuingWorkout, startWorkout, router]);
+  const canMakeRestDay = selectedWorkout.status === 'today' || selectedWorkout.status === 'upcoming';
+  const canEditExercises = selectedWorkout.status === 'today' || selectedWorkout.status === 'upcoming';
+  const restActionLabel = selectedWorkout.status === 'today' ? 'Rest Today' : 'Make Rest Day';
+  const startActionLabel = isContinuingWorkout ? 'Continue Workout' : 'Start Workout';
+
   // Loading state
   if (isLoading) {
     return (
-      <SafeAreaView edges={['top']} className="flex-1 bg-background items-center justify-center">
-        <ActivityIndicator size="large" color="#31D5E3" />
-        <Text className="text-muted-foreground mt-4">Loading workout plan...</Text>
+      <SafeAreaView edges={['top']} className="flex-1 bg-background">
+        <View className="px-4 pt-6 gap-4">
+          <View className="flex-row items-center justify-between">
+            <View className="gap-2">
+              <Skeleton className="h-8 w-36" />
+              <Skeleton className="h-4 w-24" />
+            </View>
+            <View className="flex-row gap-2">
+              <Skeleton className="w-10 h-10 rounded-full" />
+              <Skeleton className="w-10 h-10 rounded-full" />
+            </View>
+          </View>
+
+          <View className="flex-row gap-2">
+            {Array.from({ length: 6 }).map((_, idx) => (
+              <Skeleton key={`day-skeleton-${idx}`} className="h-20 w-14 rounded-xl" />
+            ))}
+          </View>
+
+          <GlassCard className="gap-3">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-4 w-52" />
+            <Skeleton className="h-12 w-full rounded-xl" />
+            <Skeleton className="h-12 w-full rounded-xl" />
+          </GlassCard>
+        </View>
       </SafeAreaView>
     );
   }
@@ -431,8 +713,8 @@ export default function WorkoutPlanScreen() {
 
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
-      <ScrollView className="flex-1">
-        <View className="px-4 py-6">
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: Math.max(12, insets.bottom) }}>
+        <View className="px-4">
           {/* Header */}
           <Animated.View style={createAnimStyle(headerAnim)} className="flex-row items-center justify-between mb-6">
             <View>
@@ -565,28 +847,23 @@ export default function WorkoutPlanScreen() {
                         )}
                       </View>
                       <Text className="text-sm text-muted-foreground">
-                        {selectedWorkout.muscles.join(' • ') || 'Full Body'}
+                        {formatMuscleGroups(selectedWorkout.muscles, ' | ') || 'Full Body'}
                       </Text>
                       <Text className="text-xs text-primary mt-1">{selectedWorkout.exercises} exercises</Text>
                     </View>
                   </View>
 
-                  {selectedWorkout.status === 'today' && (
+                  {canStartWorkout && !isCompletedToday && (
                     <View className="gap-3 mt-4">
-                      <Button 
-                        className="w-full bg-primary" 
-                        onPress={() => {
-                          // Set active workout state before navigating
-                          // Pass the PLAN ID, not the day ID
-                          if (activePlan?.id) {
-                            startWorkout(activePlan.id);
-                          }
-                          router.push('/active-workout');
-                        }}
-                      >
+                      <Button className="w-full bg-primary" onPress={handleStartOrContinueWorkout}>
                         <Zap size={16} color="#FFFFFF" />
-                        <Text className="text-primary-foreground font-semibold ml-2">Start Workout</Text>
+                        <Text className="text-primary-foreground font-semibold ml-2">{startActionLabel}</Text>
                       </Button>
+                    </View>
+                  )}
+
+                  {canMakeRestDay && (
+                    <View className="gap-3 mt-4">
                       <Button 
                         variant="outline" 
                         className="w-full" 
@@ -594,7 +871,7 @@ export default function WorkoutPlanScreen() {
                         disabled={isLoading}
                       >
                         <Pause size={16} color="#71717A" />
-                        <Text className="text-muted-foreground font-semibold ml-2">Rest Today</Text>
+                        <Text className="text-muted-foreground font-semibold ml-2">{restActionLabel}</Text>
                       </Button>
                     </View>
                   )}
@@ -612,9 +889,19 @@ export default function WorkoutPlanScreen() {
                         </View>
                         <View className="items-center flex-1">
                           <Text className="text-lg font-bold text-foreground">{completedSessionData.volume}</Text>
-                          <Text className="text-xs text-muted-foreground">Volume (lbs)</Text>
+                          <Text className="text-xs text-muted-foreground">Volume ({unit})</Text>
                         </View>
                       </View>
+                      <Button variant="outline" className="mt-4" onPress={openCompletedSummary}>
+                        <Share2 size={16} color="#31D5E3" />
+                        <Text className="text-foreground font-semibold ml-2">View Summary</Text>
+                      </Button>
+                      {isCompletedToday && (
+                        <Button className="mt-3 w-full bg-primary" onPress={handleStartOrContinueWorkout}>
+                          <Play size={16} color="#FFFFFF" />
+                          <Text className="text-primary-foreground font-semibold ml-2">Continue Training Today</Text>
+                        </Button>
+                      )}
                     </View>
                   )}
                 </GlassCard>
@@ -623,9 +910,9 @@ export default function WorkoutPlanScreen() {
                 <Text className="text-sm font-semibold text-muted-foreground mb-3 uppercase tracking-wide">Exercises</Text>
                 <View className="gap-2">
                   {dayExercises.map((exercise, i) => {
-                    const exerciseName = exercise.exercise?.name  || exercise.exerciseId;
-                    const displayName = swappedExercises[exerciseName] || exerciseName;
-                    const info = getExerciseInfo(exerciseName);
+                    const exerciseName = exercise.exercise?.name || formatExerciseDisplayName(exercise.exerciseId);
+                    const displayName = swappedExercises[exercise.id] || exerciseName;
+                    const info = getExerciseInfo(exercise.exerciseId);
                     const isExpanded = expandedExercise === exercise.id;
 
                     return (
@@ -636,22 +923,32 @@ export default function WorkoutPlanScreen() {
                               <Text className="text-sm font-bold text-foreground">{i + 1}</Text>
                             </View>
                             <View className="flex-1">
-                              <Text className="font-medium text-sm text-foreground">{exerciseName}</Text>
+                              <Text className="font-medium text-sm text-foreground">{displayName}</Text>
                               <Text className="text-xs text-muted-foreground">
-                                {exercise.targetSets} sets • {exercise.targetReps} reps
+                                {exercise.targetSets} sets | {exercise.targetReps} reps
                               </Text>
                             </View>
 
-                            {selectedWorkout.status !== 'completed' && (
+                            {canEditExercises && (
                               <Pressable
                                 onPress={() => {
-                                  setExerciseToSwap(exerciseName);
+                                  setExerciseToSwap(displayName);
                                   setExerciseToSwapId(exercise.exerciseId);
+                                  setExerciseToSwapPlanExerciseId(exercise.id);
                                   setSwapDialogOpen(true);
                                 }}
                                 className="h-8 w-8 items-center justify-center"
                               >
                                 <Wrench size={16} color="#71717A" />
+                              </Pressable>
+                            )}
+
+                            {canEditExercises && (
+                              <Pressable
+                                onPress={() => handleRemoveExerciseFromPlan(exercise)}
+                                className="h-8 w-8 items-center justify-center"
+                              >
+                                <Trash2 size={16} color="#EF4444" />
                               </Pressable>
                             )}
 
@@ -699,7 +996,7 @@ export default function WorkoutPlanScreen() {
                   })}
                   
                   {/* Add Exercise Button */}
-                  {selectedWorkout.status !== 'completed' && selectedWorkout.workoutDay && (
+                  {canEditExercises && selectedWorkout.workoutDay && (
                     <Pressable
                       onPress={() => setShowAddExerciseModal(true)}
                       className="p-3 rounded-lg border border-dashed border-primary/50 bg-primary/5 items-center justify-center"
@@ -720,18 +1017,45 @@ export default function WorkoutPlanScreen() {
       {/* Swap Exercise Modal */}
       <SwapExerciseModal
         open={swapDialogOpen}
-        onOpenChange={setSwapDialogOpen}
+        onOpenChange={(open) => {
+          setSwapDialogOpen(open);
+          if (!open) {
+            setExerciseToSwapPlanExerciseId(null);
+            setExerciseToSwap(null);
+            setExerciseToSwapId(null);
+          }
+        }}
         exerciseId={exerciseToSwapId}
         exerciseName={exerciseToSwap || ''}
-        onSwap={(newId, newName) => {
-          if (exerciseToSwap) {
+        onSwap={async (newId, newName) => {
+          if (!activePlan || !selectedWorkout?.workoutDay || !exerciseToSwapPlanExerciseId) {
+            showAppAlert('Error', 'Could not determine workout context for swap.');
+            return;
+          }
+
+          try {
+            await syncSwapExerciseToCloud(
+              activePlan.id,
+              selectedWorkout.workoutDay.id,
+              exerciseToSwapPlanExerciseId,
+              newId
+            );
+
             setSwappedExercises((prev) => ({
               ...prev,
-              [exerciseToSwap]: newName,
+              [exerciseToSwapPlanExerciseId]: newName,
             }));
+          } catch (error) {
+            if (__DEV__) {
+              console.error('Failed to swap exercise from workout plan:', error);
+            }
+            showAppAlert('Error', 'Failed to swap exercise. Please try again.');
           }
+
+          setExerciseToSwapPlanExerciseId(null);
           setExerciseToSwap(null);
           setExerciseToSwapId(null);
+          setSwapDialogOpen(false);
         }}
       />
 
@@ -767,10 +1091,35 @@ export default function WorkoutPlanScreen() {
             );
           } catch (error) {
             console.error('Failed to add exercise:', error);
-            Alert.alert('Error', 'Failed to add exercise. Please try again.');
+            showAppAlert('Error', 'Failed to add exercise. Please try again.');
           }
         }}
+      />
+
+      <ShareModal
+        open={showShareModal}
+        onOpenChange={(open) => {
+          setShowShareModal(open);
+          if (!open) {
+            setShareWorkoutData(null);
+          }
+        }}
+        workoutData={
+          shareWorkoutData || {
+            workoutName: selectedWorkout?.name || 'Workout Session',
+            duration: 0,
+            totalVolume: 0,
+            completedSets: 0,
+            prs: 0,
+            rank: undefined,
+            date: new Date(),
+            streakDays: selectedWorkoutStreak,
+            symmetryScore: selectedWorkoutSymmetryScore ?? undefined,
+          }
+        }
       />
     </SafeAreaView>
   );
 }
+
+

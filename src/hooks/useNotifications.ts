@@ -14,7 +14,14 @@ import { router } from 'expo-router';
 // ============================================================================
 
 interface NotificationData {
-  type?: 'ai_job_complete' | 'workout_reminder' | 'progress_update' | 'scan_available' | 'general';
+  type?:
+    | 'ai_job_complete'
+    | 'workout_reminder'
+    | 'progress_update'
+    | 'progress_nudge'
+    | 'scan_available'
+    | 'pro_upsell'
+    | 'general';
   url?: string;
   deepLink?: string;
   jobId?: string;
@@ -112,9 +119,17 @@ function handleNotificationNavigation(data: NotificationData) {
       router.push('/(tabs)/progress');
       break;
 
+    case 'progress_nudge':
+      router.push('/(tabs)/workout-plan');
+      break;
+
     case 'scan_available':
       // Navigate to physique scan
       router.push('/(tabs)/physique-scan');
+      break;
+
+    case 'pro_upsell':
+      router.push('/paywall');
       break;
 
     default:

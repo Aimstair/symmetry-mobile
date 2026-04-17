@@ -2,12 +2,18 @@ import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-rout
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { View, Text, ActivityIndicator, AppState, AppStateStatus, TouchableOpacity, Modal } from 'react-native';
+import { View, Text, ActivityIndicator, AppState, AppStateStatus, TouchableOpacity, Modal, InteractionManager } from 'react-native';
 import { Session } from '@supabase/supabase-js';
 import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
+import { configureReanimatedLogger, ReanimatedLogLevel } from 'react-native-reanimated';
 import { configService, ConfigStatus } from '@/services/ConfigService';
 import '../global.css';
+
+configureReanimatedLogger({
+  level: ReanimatedLogLevel.error,
+  strict: false,
+});
 
 // Initialize Sentry for crash reporting
 import { initializeSentry, withSentry, SentryErrorBoundary, setUserContext, clearUserContext } from '@/lib/monitoring';
@@ -35,6 +41,8 @@ import { useAppStore } from '@/store/useAppStore';
 import { useDataInitialization } from '@/hooks/useDataInitialization';
 import { supabase } from '@/lib/supabase';
 import { initializeExerciseLookup } from '@/hooks/useExercises';
+import { AppAlertHost } from '@/components/ui/AppAlertHost';
+import { notificationService } from '@/services/NotificationService';
 
 /**
  * Maintenance Screen Component
@@ -81,7 +89,9 @@ function ForceUpdateModal({
 }) {
   const handleUpdate = () => {
     Linking.openURL(storeUrl).catch((err) => {
-      console.error('Failed to open store:', err);
+      if (__DEV__) {
+        console.error('Failed to open store:', err);
+      }
     });
   };
 
@@ -169,7 +179,6 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isProfileLoading, setIsProfileLoading] = useState(false);
   const [profileChecked, setProfileChecked] = useState(false);
-  const [isReady, setIsReady] = useState(false);
   const isFetchingProfile = useRef(false); // Prevent concurrent fetches
   
   // Config status for maintenance mode and force update
@@ -181,6 +190,7 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const setUser = useAppStore((s) => s.setUser);
   const onboarding = useAppStore((s) => s.onboarding);
   const completeOnboarding = useAppStore((s) => s.completeOnboarding);
+  const settings = useAppStore((s) => s.settings);
 
   // Fetch app configuration on mount
   const checkConfig = useCallback(async () => {
@@ -198,7 +208,9 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
         });
       }
     } catch (error) {
-      console.error('Failed to fetch config:', error);
+      if (__DEV__) {
+        console.error('Failed to fetch config:', error);
+      }
       // Proceed without blocking if config fetch fails
       setConfigStatus({
         isLoaded: false,
@@ -437,29 +449,69 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   // Note: Profile fetch is now handled in the SIGNED_IN event above
   // This useEffect is disabled to prevent duplicate fetches
   
-  // Initialize exercise lookup cache for sync access
+  // Initialize exercise lookup cache for sync access after first interactions.
+  // This avoids blocking first render with catalog hydration work.
   useEffect(() => {
     if (session && profileChecked && isUsingCloudService()) {
-      // Initialize exercise cache in background
-      initializeExerciseLookup().catch((error) => {
-        if (__DEV__) {
-          console.log('⚠️ Failed to initialize exercise cache:', error);
-        }
+      const task = InteractionManager.runAfterInteractions(() => {
+        initializeExerciseLookup().catch(async (error) => {
+          console.warn('⚠️ Failed to initialize exercise cache. Retrying with forced sync...', error);
+
+          try {
+            await dataService.exercise.forceSync();
+            await initializeExerciseLookup();
+          } catch (retryError) {
+            console.error('❌ Exercise cache recovery failed:', retryError);
+          }
+        });
       });
+
+      return () => {
+        task.cancel();
+      };
     }
+
+    return undefined;
   }, [session, profileChecked]);
 
-  // Handle routing based on auth state
   useEffect(() => {
-    if (isAuthLoading || isProfileLoading) return;
-    if (session && !profileChecked) return; // Wait for profile check
-
-    // Mark as ready and hide splash screen first
-    if (!isReady) {
-      setIsReady(true);
-      SplashScreen.hideAsync();
+    const currentUserId = session?.user?.id;
+    if (!currentUserId) {
+      notificationService.cleanup();
+      return;
     }
-  }, [session, isAuthLoading, isProfileLoading, profileChecked, isReady]);
+
+    void notificationService.initialize(currentUserId);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!session?.user?.id) {
+      return;
+    }
+
+    const syncWorkoutReminder = async () => {
+      if (!settings.notifications.workoutReminders) {
+        await notificationService.cancelWorkoutReminders();
+        return;
+      }
+
+      await notificationService.scheduleWorkoutReminder(
+        settings.workoutReminderHour,
+        settings.workoutReminderMinute
+      );
+    };
+
+    syncWorkoutReminder().catch((error) => {
+      if (__DEV__) {
+        console.warn('Unable to sync workout reminder schedule:', error);
+      }
+    });
+  }, [
+    session?.user?.id,
+    settings.notifications.workoutReminders,
+    settings.workoutReminderHour,
+    settings.workoutReminderMinute,
+  ]);
 
   // Show loading while checking config, auth, or loading profile
   if (isConfigLoading || isAuthLoading || isProfileLoading) {
@@ -577,18 +629,20 @@ function DataInitializer({ children }: { children: React.ReactNode }) {
   const user = useAppStore((s) => s.user);
   const onboarding = useAppStore((s) => s.onboarding);
   const activeWorkout = useAppStore((s) => s.activeWorkout);
+  const workoutPlans = useAppStore((s) => s.workoutPlans);
+  const workoutHistory = useAppStore((s) => s.workoutHistory);
+  const settings = useAppStore((s) => s.settings);
   const endWorkout = useAppStore((s) => s.endWorkout);
 
   // Initialize data - pass user ID if available
   const { isLoading, isInitialized, error, refetch } = useDataInitialization(user?.id || null);
 
-  // Auto-finish stale workouts from previous days
-  useEffect(() => {
-    if (!activeWorkout.isActive || !activeWorkout.startTime) return;
+  const checkAndAutoFinish = useCallback(async () => {
+      if (!activeWorkout.isActive || !activeWorkout.startTime) return;
 
-    const checkAndAutoFinish = async () => {
       const startTime = new Date(activeWorkout.startTime!);
       const now = new Date();
+      if (Number.isNaN(startTime.getTime())) return;
       
       // Check if the workout was started on a different day
       const startDay = new Date(startTime.getFullYear(), startTime.getMonth(), startTime.getDate());
@@ -607,18 +661,32 @@ function DataInitializer({ children }: { children: React.ReactNode }) {
 
         if (hasCompletedSets && user?.id) {
           try {
+            // Build lookup from plan_exercise.id -> catalog_exercise.id
+            const exerciseIdLookup = new Map<string, string>();
+            const candidatePlans = activeWorkout.workoutId
+              ? workoutPlans.filter((plan) => plan.id === activeWorkout.workoutId)
+              : workoutPlans;
+
+            candidatePlans.forEach((plan) => {
+              plan.workoutDays?.forEach((day) => {
+                day.exercises?.forEach((exercise) => {
+                  exerciseIdLookup.set(exercise.id, exercise.exerciseId);
+                });
+              });
+            });
+
             // Prepare session data from stored exercise sets
+            // Include ALL sets (completed or not) to preserve workout history
             const sessionExercises = Object.entries(exerciseSets)
-              .filter(([_, sets]) => sets.some((s) => s.isCompleted))
-              .map(([exerciseId, sets]) => ({
-                exerciseId,
-                sets: sets
-                  .filter((s) => s.isCompleted)
-                  .map((s) => ({
+              .filter(([_, sets]) => sets.length > 0) // Include exercises with any sets
+              .map(([exerciseSetId, sets]) => ({
+                exerciseId: exerciseIdLookup.get(exerciseSetId) || exerciseSetId,
+                sets: sets.map((s) => ({
                     weight: s.weight || 0,
                     reps: s.reps || 0,
+                  rpe: s.rpe,
                     isWarmup: s.isWarmup || false,
-                    isCompleted: s.isCompleted || false,
+                    isCompleted: s.isCompleted ?? false, // Preserve completion status
                   })),
               }));
 
@@ -649,33 +717,52 @@ function DataInitializer({ children }: { children: React.ReactNode }) {
           console.log('✅ Stale workout ended');
         }
       }
-    };
+    }, [activeWorkout, user?.id, workoutPlans, endWorkout]);
 
+  // Auto-finish stale workouts from previous days
+  useEffect(() => {
     checkAndAutoFinish();
-  }, [activeWorkout.isActive, activeWorkout.startTime, user?.id]);
+  }, [checkAndAutoFinish]);
+
+  const maybeScheduleProgressNudge = useCallback(async () => {
+    if (!user?.id) return;
+
+    const lastWorkoutDate = workoutHistory
+      .map((session: { startedAt?: string | Date | null }) => {
+        const dateValue = session?.startedAt;
+        if (!dateValue) return null;
+        const parsed = new Date(dateValue);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+      })
+      .filter((value: Date | null): value is Date => value !== null)
+      .sort((a: Date, b: Date) => b.getTime() - a.getTime())[0];
+
+    await notificationService.maybeScheduleProgressNudge({
+      enabled: settings.notifications.progressUpdates,
+      lastWorkoutAt: lastWorkoutDate,
+      delaySeconds: 45,
+    });
+  }, [settings.notifications.progressUpdates, user?.id, workoutHistory]);
+
+  useEffect(() => {
+    maybeScheduleProgressNudge().catch((error) => {
+      if (__DEV__) {
+        console.warn('Unable to schedule progress nudge:', error);
+      }
+    });
+  }, [maybeScheduleProgressNudge]);
 
   // Also check when app comes to foreground
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && activeWorkout.isActive && activeWorkout.startTime) {
-        const startTime = new Date(activeWorkout.startTime);
-        const now = new Date();
-        
-        const startDay = new Date(startTime.getFullYear(), startTime.getMonth(), startTime.getDate());
-        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        
-        if (startDay < today) {
-          // Trigger re-render to run the auto-finish check
-          // The above useEffect will handle the actual auto-finish
-          if (__DEV__) {
-            console.log('🔄 App resumed with stale workout, will auto-finish');
-          }
-        }
+      if (state === 'active') {
+        checkAndAutoFinish();
+        void maybeScheduleProgressNudge();
       }
     });
 
     return () => subscription.remove();
-  }, [activeWorkout.isActive, activeWorkout.startTime]);
+  }, [checkAndAutoFinish, maybeScheduleProgressNudge]);
 
   // Show loading screen while initializing (only for cloud service with a user)
   if (isUsingCloudService() && user?.id && isLoading && !isInitialized) {
@@ -734,6 +821,21 @@ function ErrorFallback({ error, resetError }: { error: Error; resetError: () => 
 }
 
 function RootLayout() {
+  const rootNavigationState = useRootNavigationState();
+  const hasHiddenSplashRef = useRef(false);
+
+  useEffect(() => {
+    if (hasHiddenSplashRef.current) return;
+    if (!rootNavigationState?.key) return;
+
+    hasHiddenSplashRef.current = true;
+    SplashScreen.hideAsync().catch((error) => {
+      if (__DEV__) {
+        console.warn('Unable to hide splash screen:', error);
+      }
+    });
+  }, [rootNavigationState?.key]);
+
   // Initialize and log data service on mount
   useEffect(() => {
     if (__DEV__) {
@@ -746,10 +848,14 @@ function RootLayout() {
     async function testConnection() {
       try {
         if (isUsingCloudService()) {
-          console.log('✅ Supabase client initialized');
+          if (__DEV__) {
+            console.log('✅ Supabase client initialized');
+          }
         }
       } catch (error) {
-        console.error('❌ Error initializing data service:', error);
+        if (__DEV__) {
+          console.error('❌ Error initializing data service:', error);
+        }
       }
     }
 
@@ -757,51 +863,57 @@ function RootLayout() {
   }, []);
 
   return (
-    <SentryErrorBoundary fallback={({ error, resetError }) => <ErrorFallback error={error} resetError={resetError} />}>
-      <SafeAreaProvider>
-        <StatusBar style="light" />
-        <AuthProvider>
-          <DataInitializer>
-            <Stack
-              screenOptions={{
-                headerShown: false,
-                contentStyle: { backgroundColor: 'hsl(240, 10%, 3.9%)' },
-                animation: 'slide_from_right',
-              }}
-            >
-              <Stack.Screen name="index" options={{ headerShown: false }} />
-              <Stack.Screen name="login" options={{ headerShown: false }} />
-              <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
-              <Stack.Screen name="onboarding" options={{ headerShown: false }} />
-              <Stack.Screen name="workout-builder" options={{ headerShown: false }} />
-              <Stack.Screen 
-                name="paywall" 
-                options={{ 
+    <SentryErrorBoundary fallback={({ error, resetError }) => <ErrorFallback error={error as Error} resetError={resetError} />}>
+      <View className="flex-1 bg-background">
+        <SafeAreaProvider>
+          <StatusBar style="light" translucent={false} backgroundColor="#0A0A0F" />
+          <AuthProvider>
+            <DataInitializer>
+              <Stack
+                screenOptions={{
                   headerShown: false,
-                  presentation: 'modal',
-                  animation: 'slide_from_bottom',
-                }} 
-              />
-              <Stack.Screen name="symmetry-history" 
-                options={{ 
-                  headerShown: false,
-                  animation: 'slide_from_right',
-                }} 
-              />
-              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-              <Stack.Screen
-                name="active-workout"
-                options={{
-                  headerShown: false,
-                  presentation: 'fullScreenModal',
-                  animation: 'slide_from_bottom',
+                  contentStyle: {
+                    backgroundColor: 'hsl(240, 10%, 3.9%)',
+                    paddingTop: 8,
+                  },
+                  animation: 'none',
                 }}
-              />
-            </Stack>
-            <NavigationGuard />
-          </DataInitializer>
-        </AuthProvider>
-      </SafeAreaProvider>
+              >
+                <Stack.Screen name="index" options={{ headerShown: false }} />
+                <Stack.Screen name="login" options={{ headerShown: false }} />
+                <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
+                <Stack.Screen name="onboarding" options={{ headerShown: false }} />
+                <Stack.Screen name="workout-builder" options={{ headerShown: false }} />
+                <Stack.Screen 
+                  name="paywall" 
+                  options={{ 
+                    headerShown: false,
+                    presentation: 'modal',
+                    animation: 'none',
+                  }} 
+                />
+                <Stack.Screen name="symmetry-history" 
+                  options={{ 
+                    headerShown: false,
+                    animation: 'none',
+                  }} 
+                />
+                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen
+                  name="active-workout"
+                  options={{
+                    headerShown: false,
+                    presentation: 'fullScreenModal',
+                    animation: 'none',
+                  }}
+                />
+              </Stack>
+              <NavigationGuard />
+              <AppAlertHost />
+            </DataInitializer>
+          </AuthProvider>
+        </SafeAreaProvider>
+      </View>
     </SentryErrorBoundary>
   );
 }

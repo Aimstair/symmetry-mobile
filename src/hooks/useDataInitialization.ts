@@ -16,6 +16,7 @@ import { dataService } from '@/services/dataServiceProvider';
 import { localService } from '@/services/LocalService';
 import { useAppStore } from '@/store/useAppStore';
 import { runCacheCleanup } from '@/lib/cacheManager';
+import { DEFAULT_FRESHNESS_WINDOW_MS, isAbortError, isStaleTimestamp } from '@/lib/utils';
 
 interface DataInitializationState {
   isLoading: boolean;
@@ -29,6 +30,11 @@ interface UseDataInitializationReturn extends DataInitializationState {
 
 /**
  * Hook to initialize app data from the data service
+ * 
+ * Uses "stale-while-revalidate" pattern:
+ * - If data exists in store, show it immediately (no loading spinner)
+ * - Silently refresh in the background
+ * - Only show loading spinner if store is completely empty
  * 
  * @param userId - The user ID to fetch data for (can be null during onboarding)
  * @returns Loading state, error state, and refetch function
@@ -46,6 +52,11 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
   const setEquipment = useAppStore((s) => s.setEquipment);
   const setWorkoutPlans = useAppStore((s) => s.setWorkoutPlans);
   const isGuest = useAppStore((s) => s.isGuest);
+  
+  // Check if we already have data in store (for stale-while-revalidate)
+  const existingUserId = useAppStore((s) => s.user?.id ?? null);
+  const existingPlansCount = useAppStore((s) => s.workoutPlans.length);
+  const hasExistingData = existingUserId !== null || existingPlansCount > 0;
   
   // Track if cache cleanup has run this session
   const cacheCleanupRan = useRef(false);
@@ -66,11 +77,18 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
       return;
     }
 
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    // Stale-while-revalidate: Only show loading if we have NO data
+    // If we have cached data, show it immediately and refresh silently
+    if (!hasExistingData) {
+      setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    } else {
+      // We have data, mark as initialized immediately, refresh in background
+      setState((prev) => ({ ...prev, isLoading: false, isInitialized: true, error: null }));
+    }
 
     try {
       if (__DEV__) {
-        console.log('📥 Initializing data for user:', userId);
+        console.log('📥 Initializing data for user:', userId, hasExistingData ? '(background refresh)' : '(initial load)');
       }
 
       // Use LocalService directly for guest users to avoid UUID errors
@@ -115,6 +133,16 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
         console.log('🎉 Data initialization complete');
       }
     } catch (error) {
+      if (isAbortError(error)) {
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          isInitialized: prev.isInitialized || hasExistingData,
+          error: null,
+        }));
+        return;
+      }
+
       const errorMessage = error instanceof Error ? error.message : 'Failed to load data';
       console.error('❌ Data initialization error:', errorMessage);
       
@@ -124,7 +152,7 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
         error: errorMessage,
       });
     }
-  }, [userId, isGuest, setUser, setNutritionTargets, setEquipment, setWorkoutPlans]);
+  }, [userId, isGuest, hasExistingData, setUser, setNutritionTargets, setEquipment, setWorkoutPlans]);
 
   // Initialize on mount and when userId changes
   useEffect(() => {
@@ -140,55 +168,105 @@ export function useDataInitialization(userId: string | null): UseDataInitializat
 /**
  * Hook to load progress data (body measurements, scans, cardio logs)
  * Separated from main init for lazy loading on the Progress tab
+ * 
+ * Uses "stale-while-revalidate" pattern:
+ * - If data exists in store, show it immediately (no loading spinner)
+ * - Silently refresh in the background
+ * - Only show loading spinner if store is completely empty
  */
 export function useProgressDataInitialization(userId: string | null) {
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const lastLoadAtRef = useRef(0);
 
   // Use the bulk set methods instead of individual add methods
   const setMeasurementLogs = useAppStore((s) => s.setMeasurementLogs);
   const setPhysiqueScans = useAppStore((s) => s.setPhysiqueScans);
   const setCardioLogs = useAppStore((s) => s.setCardioLogs);
   const isGuest = useAppStore((s) => s.isGuest);
+  
+  // Check if we already have data in store (for stale-while-revalidate)
+  const measurementCount = useAppStore((s) => s.measurementLogs.length);
+  const physiqueScanCount = useAppStore((s) => s.physiqueScans.length);
+  const cardioCount = useAppStore((s) => s.cardioLogs.length);
 
-  const loadProgressData = useCallback(async () => {
+  const hasExistingData = measurementCount > 0 || physiqueScanCount > 0 || cardioCount > 0;
+
+  const loadProgressData = useCallback(async (options?: { force?: boolean; staleMs?: number }) => {
     if (!userId) return;
 
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      // Use LocalService directly for guest users to avoid UUID errors
-      const service = isGuest ? localService : dataService;
-      
-      const [measurements, scans, cardio] = await Promise.all([
-        service.progress.getMeasurementLogs(userId),
-        service.progress.getPhysiqueScans(userId),
-        service.progress.getCardioLogs(userId),
-      ]);
-
-      // Set all data at once (replacing existing data with fresh data from server)
-      setMeasurementLogs(measurements);
-      setPhysiqueScans(scans);
-      setCardioLogs(cardio);
-
-      if (__DEV__) {
-        console.log('✅ Progress data loaded:', {
-          measurements: measurements.length,
-          scans: scans.length,
-          cardio: cardio.length,
-        });
-      }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to load progress data';
-      setError(errorMessage);
-      console.error('❌ Progress data error:', errorMessage);
-    } finally {
-      setIsLoading(false);
+    const now = Date.now();
+    const force = options?.force ?? false;
+    const staleMs = options?.staleMs ?? DEFAULT_FRESHNESS_WINDOW_MS;
+    if (inFlightRef.current) {
+      return inFlightRef.current;
     }
+
+    // Prevent near-duplicate refreshes from focus + mount effects.
+    if (!force && !isStaleTimestamp(lastLoadAtRef.current, staleMs)) {
+      return;
+    }
+
+    const run = async () => {
+      setIsRefreshing(true);
+
+      // Stale-while-revalidate: Only show loading if we have NO data
+      // If we have cached data, show it immediately and refresh silently
+      if (!hasExistingData) {
+        setIsLoading(true);
+      }
+      setError(null);
+
+      try {
+        // Use LocalService directly for guest users to avoid UUID errors
+        const service = isGuest ? localService : dataService;
+        
+        const [measurements, scans, cardio] = await Promise.all([
+          service.progress.getMeasurementLogs(userId),
+          service.progress.getPhysiqueScans(userId),
+          service.progress.getCardioLogs(userId),
+        ]);
+
+        // Set all data at once (replacing existing data with fresh data from server)
+        setMeasurementLogs(measurements);
+        setPhysiqueScans(scans);
+        setCardioLogs(cardio);
+
+        if (__DEV__) {
+          console.log('✅ Progress data loaded:', {
+            measurements: measurements.length,
+            scans: scans.length,
+            cardio: cardio.length,
+          });
+        }
+      } catch (err) {
+        if (isAbortError(err)) {
+          setError(null);
+          return;
+        }
+
+        const errorMessage = err instanceof Error ? err.message : 'Failed to load progress data';
+        setError(errorMessage);
+        console.error('❌ Progress data error:', errorMessage);
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    };
+
+    const promise = run().finally(() => {
+      inFlightRef.current = null;
+      lastLoadAtRef.current = Date.now();
+    });
+
+    inFlightRef.current = promise;
+    return promise;
   }, [
     userId,
     isGuest,
+    hasExistingData,
     setMeasurementLogs,
     setPhysiqueScans,
     setCardioLogs,
@@ -196,6 +274,7 @@ export function useProgressDataInitialization(userId: string | null) {
 
   return {
     isLoading,
+    isRefreshing,
     error,
     loadProgressData,
   };

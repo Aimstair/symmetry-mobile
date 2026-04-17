@@ -80,3 +80,6 @@ export const GlassCard = React.forwardRef<React.ElementRef<typeof View>, GlassCa
 );
 
 GlassCard.displayName = 'GlassCard';
+
+// Note: GlassCard already uses forwardRef which provides some optimization.
+// For further memoization, wrap with React.memo at the usage site if needed.

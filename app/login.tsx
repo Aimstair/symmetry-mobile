@@ -1,15 +1,16 @@
-import { useState, useEffect } from 'react';
-import { View, Text, Platform, Alert, ActivityIndicator, StyleSheet, Pressable, Linking as RNLinking, Image } from 'react-native';
+﻿import { useState, useEffect } from 'react';
+import { View, Text, Platform,  ActivityIndicator, StyleSheet, Pressable, Linking as RNLinking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking'; // ✅ Added for createURL
+import * as Linking from 'expo-linking'; // âœ… Added for createURL
 import Constants from 'expo-constants';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Sparkles, Dumbbell } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
 import { useAppStore } from '@/store/useAppStore';
+import { showAppAlert } from '@/store/useAlertStore';
 
 /**
  * Login Screen - Guest-First Architecture
@@ -42,7 +43,7 @@ export default function Login() {
       // Force the 'symmetry' scheme to avoid redirecting to Expo Go in production
       const redirectUri = Linking.createURL('/', { scheme: 'symmetry' });
 
-      console.log('🔗 OAuth redirect URI:', redirectUri);
+      console.log('ðŸ”— OAuth redirect URI:', redirectUri);
 
       // 2. Setup Listener
       let linkingListener: any;
@@ -111,7 +112,7 @@ export default function Login() {
         useAppStore.getState().completeOnboarding();
 
         if (__DEV__) {
-          console.log('✅ Session set & Onboarding forced to TRUE');
+          console.log('âœ… Session set & Onboarding forced to TRUE');
         }
 
         // B. Sync Guest Data (if needed)
@@ -134,9 +135,9 @@ export default function Login() {
         // === CRITICAL FIX ENDS HERE ===
       }
     } catch (error: any) {
-      console.error('❌ Google Sign-In error:', error);
+      console.error('âŒ Google Sign-In error:', error);
       if (error.message !== 'OAuth timed out after 2 minutes') {
-          Alert.alert('Sign-In Failed', error.message);
+          showAppAlert('Sign-In Failed', error.message);
       }
     } finally {
       setIsLoading(false);
@@ -364,3 +365,4 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
 });
+

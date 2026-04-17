@@ -100,25 +100,48 @@ export function TabsContent({ value, children, className }: TabsContentProps) {
   const { value: selectedValue } = useTabsContext();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(20)).current;
+  const animationInFlightRef = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
-    if (selectedValue === value) {
-      fadeAnim.setValue(0);
-      slideAnim.setValue(20);
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-      ]).start();
+    if (animationInFlightRef.current) {
+      animationInFlightRef.current.stop();
+      animationInFlightRef.current = null;
     }
-  }, [selectedValue, value, fadeAnim, slideAnim]);
+
+    if (selectedValue !== value) {
+      return;
+    }
+
+    fadeAnim.setValue(0);
+    slideAnim.setValue(20);
+
+    const animation = Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]);
+
+    animationInFlightRef.current = animation;
+    animation.start(() => {
+      if (animationInFlightRef.current === animation) {
+        animationInFlightRef.current = null;
+      }
+    });
+
+    return () => {
+      animation.stop();
+      if (animationInFlightRef.current === animation) {
+        animationInFlightRef.current = null;
+      }
+    };
+  }, [selectedValue, value]);
 
   if (selectedValue !== value) {
     return null;

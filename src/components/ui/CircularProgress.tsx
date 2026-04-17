@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils';
  * - Replaced span elements with Text
  * - SVG animation handled via strokeDashoffset
  * - Maintains exact same API as web version
+ * - Wrapped in React.memo for performance optimization
  */
 
 interface CircularProgressProps {
@@ -26,7 +27,7 @@ interface CircularProgressProps {
   className?: string;
 }
 
-export function CircularProgress({
+function CircularProgressInner({
   value,
   max,
   size = 80,
@@ -96,3 +97,14 @@ export function CircularProgress({
     </View>
   );
 }
+
+// Memoize to prevent unnecessary re-renders when parent components update
+export const CircularProgress = React.memo(CircularProgressInner, (prev, next) => {
+  return (
+    prev.value === next.value &&
+    prev.max === next.max &&
+    prev.size === next.size &&
+    prev.color === next.color &&
+    prev.label === next.label
+  );
+});

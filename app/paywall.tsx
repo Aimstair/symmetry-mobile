@@ -1,15 +1,14 @@
-/**
+﻿/**
  * Paywall Screen - Subscription Upgrade UI
  * 
  * Shows subscription options and handles purchases via RevenueCat.
  * Displays comparison between Free and Pro tiers.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, Linking, Alert, ActivityIndicator } from 'react-native';
+import { useState, useEffect, useRef } from 'react';
+import { View, Text, ScrollView, Pressable, Linking,  ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
 import { 
   X, 
   Crown, 
@@ -23,10 +22,13 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { subscriptionService, type SubscriptionPackage } from '@/services/SubscriptionService';
+import { cn } from '@/lib/utils';
 
 // Package identifiers from RevenueCat
 const PACKAGE_YEARLY = '$rc_annual';
 const PACKAGE_MONTHLY = '$rc_monthly';
+
+type ToastKind = 'success' | 'error' | 'info';
 
 export default function Paywall() {
   const router = useRouter();
@@ -37,6 +39,10 @@ export default function Paywall() {
   const [isLoading, setIsLoading] = useState(true);
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [selectedPackage, setSelectedPackage] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastKind, setToastKind] = useState<ToastKind>('info');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const purchaseLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   const isPro = useAppStore((s) => s.isPro);
   const setIsPro = useAppStore((s) => s.setIsPro);
@@ -47,9 +53,75 @@ export default function Paywall() {
     router.replace('/(tabs)');
   };
 
+  const navigateToProBenefits = () => {
+    router.replace('/pro-benefits');
+  };
+
+  const showStatusToast = (message: string, kind: ToastKind = 'info') => {
+    setToastKind(kind);
+    setToastMessage(message);
+
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+
+    toastTimerRef.current = setTimeout(() => {
+      setToastMessage(null);
+      toastTimerRef.current = null;
+    }, 3500);
+  };
+
+  const handleClose = () => {
+    if (isFromOnboarding) {
+      navigateToTabs();
+      return;
+    }
+
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+
+    navigateToTabs();
+  };
+
   // Load available packages on mount
   useEffect(() => {
     loadPackages();
+  }, []);
+
+  useEffect(() => {
+    if (!isPurchasing) {
+      if (purchaseLockTimerRef.current) {
+        clearTimeout(purchaseLockTimerRef.current);
+        purchaseLockTimerRef.current = null;
+      }
+      return;
+    }
+
+    purchaseLockTimerRef.current = setTimeout(() => {
+      setIsPurchasing(false);
+      showStatusToast('Purchase timed out. Please try again.', 'error');
+      purchaseLockTimerRef.current = null;
+    }, 20000);
+
+    return () => {
+      if (purchaseLockTimerRef.current) {
+        clearTimeout(purchaseLockTimerRef.current);
+        purchaseLockTimerRef.current = null;
+      }
+    };
+  }, [isPurchasing]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+      if (purchaseLockTimerRef.current) {
+        clearTimeout(purchaseLockTimerRef.current);
+      }
+    };
   }, []);
 
   const loadPackages = async () => {
@@ -80,20 +152,25 @@ export default function Paywall() {
     try {
       const result = await subscriptionService.purchasePackage(packageId);
       
-      if (result.success) {
-        setIsPro(true);
-        Alert.alert(
-          'Welcome to Pro! 🎉',
-          'You now have access to weekly physique scans and all premium features.',
-          [{ text: 'Awesome!', onPress: navigateToTabs }]
+      // Strict check: only upgrade if the entitlement is actually active.
+      if (result.success && result.isPro) {
+        setIsPro(true); // Only now do we update global state
+        showStatusToast('Pro unlocked. Welcome!', 'success');
+        navigateToProBenefits();
+      } else if (result.success && !result.isPro) {
+        // Edge case: paid, but no entitlement (dashboard config error).
+        console.error('Purchase successful but PRO entitlement missing. Check RevenueCat Dashboard.');
+        showStatusToast(
+          'Payment succeeded, but Pro was not activated. Try Restore Purchases.',
+          'error'
         );
       } else if (result.error === 'cancelled') {
-        // User cancelled - do nothing
+        showStatusToast('Purchase cancelled.', 'info');
       } else {
-        Alert.alert('Purchase Failed', result.error || 'Please try again.');
+        showStatusToast(result.error || 'Purchase failed. Please try again.', 'error');
       }
     } catch (error) {
-      Alert.alert('Error', 'Something went wrong. Please try again.');
+      showStatusToast('Something went wrong. Please try again.', 'error');
     } finally {
       setIsPurchasing(false);
     }
@@ -106,29 +183,26 @@ export default function Paywall() {
       
       if (result.success && result.isPro) {
         setIsPro(true);
-        Alert.alert(
-          'Purchases Restored!',
-          'Your Pro subscription has been restored.',
-          [{ text: 'Great!', onPress: navigateToTabs }]
-        );
+        showStatusToast('Purchases restored. Pro unlocked!', 'success');
+        navigateToProBenefits();
       } else if (result.success) {
-        Alert.alert('No Purchases Found', 'No active subscriptions were found for your account.');
+        showStatusToast('No active purchases were found for your account.', 'info');
       } else {
-        Alert.alert('Restore Failed', result.error || 'Please try again.');
+        showStatusToast(result.error || 'Restore failed. Please try again.', 'error');
       }
     } catch (error) {
-      Alert.alert('Error', 'Something went wrong. Please try again.');
+      showStatusToast('Something went wrong. Please try again.', 'error');
     } finally {
       setIsPurchasing(false);
     }
   };
 
   const openTerms = () => {
-    Linking.openURL('https://symmetry.app/terms');
+    Linking.openURL('https://symmetryai.app/terms');
   };
 
   const openPrivacy = () => {
-    Linking.openURL('https://symmetry.app/privacy');
+    Linking.openURL('https://symmetryai.app/privacy');
   };
 
   // Find package details
@@ -141,11 +215,11 @@ export default function Paywall() {
       <SafeAreaView className="flex-1 bg-background">
         <View className="flex-1 items-center justify-center px-6">
           <Crown size={64} color="#F59E0B" />
-          <Text className="text-2xl font-bold text-foreground mt-4">You're a Pro! 👑</Text>
+          <Text className="text-2xl font-bold text-foreground mt-4">You're a Pro!</Text>
           <Text className="text-muted-foreground text-center mt-2">
             You already have access to all premium features.
           </Text>
-          <Button className="mt-8" onPress={isFromOnboarding ? navigateToTabs : () => router.back()}>
+          <Button className="mt-8" onPress={handleClose}>
             <Text className="text-primary-foreground font-semibold">
               {isFromOnboarding ? 'Get Started' : 'Go Back'}
             </Text>
@@ -160,7 +234,7 @@ export default function Paywall() {
       {/* Header */}
       <View className="flex-row items-center justify-between px-4 py-3">
         <Pressable 
-          onPress={isFromOnboarding ? navigateToTabs : () => router.back()}
+          onPress={handleClose}
           className="w-10 h-10 items-center justify-center rounded-full bg-card"
         >
           <X size={24} color="#A1A1AA" />
@@ -184,7 +258,7 @@ export default function Paywall() {
             Unlock Symmetry Pro
           </Text>
           <Text className="text-muted-foreground text-center mt-2 text-lg">
-            Scan more often. Progress faster.
+            Train with deeper insights and smarter coaching.
           </Text>
         </View>
 
@@ -221,14 +295,28 @@ export default function Paywall() {
               </View>
             </View>
 
+            {/* Advanced Metrics Row */}
+            <View className="flex-row border-b border-border">
+              <View className="flex-1 p-4 flex-row items-center gap-2">
+                <Zap size={18} color="#A1A1AA" />
+                <Text className="text-foreground">Advanced Metrics (RPE)</Text>
+              </View>
+              <View className="flex-1 p-4 items-center border-l border-border">
+                <X size={20} color="#EF4444" />
+              </View>
+              <View className="flex-1 p-4 items-center border-l border-border bg-primary/10">
+                <Check size={20} color="#22C55E" />
+              </View>
+            </View>
+
             {/* AI Analysis Row */}
             <View className="flex-row border-b border-border">
               <View className="flex-1 p-4 flex-row items-center gap-2">
                 <Sparkles size={18} color="#A1A1AA" />
-                <Text className="text-foreground">AI Analysis</Text>
+                <Text className="text-foreground">AI Analysis & Insight</Text>
               </View>
               <View className="flex-1 p-4 items-center border-l border-border">
-                <Check size={20} color="#22C55E" />
+                <X size={20} color="#EF4444" />
               </View>
               <View className="flex-1 p-4 items-center border-l border-border bg-primary/10">
                 <Check size={20} color="#22C55E" />
@@ -238,7 +326,7 @@ export default function Paywall() {
             {/* Priority Support Row */}
             <View className="flex-row">
               <View className="flex-1 p-4 flex-row items-center gap-2">
-                <Zap size={18} color="#A1A1AA" />
+                <Shield size={18} color="#A1A1AA" />
                 <Text className="text-foreground">Priority Support</Text>
               </View>
               <View className="flex-1 p-4 items-center border-l border-border">
@@ -440,11 +528,11 @@ export default function Paywall() {
             <Pressable onPress={handleRestore} disabled={isPurchasing}>
               <Text className="text-primary text-sm">Restore Purchases</Text>
             </Pressable>
-            <Text className="text-muted-foreground">•</Text>
+            <Text className="text-muted-foreground">|</Text>
             <Pressable onPress={openTerms}>
               <Text className="text-primary text-sm">Terms of Service</Text>
             </Pressable>
-            <Text className="text-muted-foreground">•</Text>
+            <Text className="text-muted-foreground">|</Text>
             <Pressable onPress={openPrivacy}>
               <Text className="text-primary text-sm">Privacy Policy</Text>
             </Pressable>
@@ -456,6 +544,32 @@ export default function Paywall() {
           </Text>
         </View>
       </ScrollView>
+
+      {toastMessage ? (
+        <View pointerEvents="none" className="absolute left-6 right-6 bottom-6 z-50">
+          <View
+            className={cn(
+              'rounded-xl border px-4 py-3',
+              toastKind === 'success' && 'bg-success/20 border-success/40',
+              toastKind === 'error' && 'bg-destructive/20 border-destructive/40',
+              toastKind === 'info' && 'bg-card border-border'
+            )}
+          >
+            <Text
+              className={cn(
+                'text-sm font-medium',
+                toastKind === 'success' && 'text-success',
+                toastKind === 'error' && 'text-destructive',
+                toastKind === 'info' && 'text-foreground'
+              )}
+            >
+              {toastMessage}
+            </Text>
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
+
+

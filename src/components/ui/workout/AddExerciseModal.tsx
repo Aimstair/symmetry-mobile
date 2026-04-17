@@ -11,6 +11,7 @@ interface AddExerciseModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAddExercise: (exercise: Omit<PlanExercise, 'id' | 'orderIndex'>) => void;
+  defaultRestSeconds?: number;
   /** Filter exercises to exclude already added ones */
   excludeExerciseIds?: string[];
 }
@@ -19,6 +20,7 @@ export function AddExerciseModal({
   open, 
   onOpenChange,
   onAddExercise,
+  defaultRestSeconds = 90,
   excludeExerciseIds = [],
 }: AddExerciseModalProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -28,6 +30,11 @@ export function AddExerciseModal({
   const [selectedExercise, setSelectedExercise] = useState<CatalogExercise | null>(null);
   const [sets, setSets] = useState('3');
   const [reps, setReps] = useState('10');
+  const [restSeconds, setRestSeconds] = useState(String(defaultRestSeconds));
+  const isValidSets = /^\d+$/.test(sets.trim()) && Number(sets.trim()) > 0;
+  const isValidReps = reps.trim().length > 0;
+  const isValidRest = /^\d+$/.test(restSeconds.trim()) && Number(restSeconds.trim()) > 0;
+  const canAddExercise = !!selectedExercise && isValidSets && isValidReps && isValidRest;
 
   // Load all exercises when modal opens
   useEffect(() => {
@@ -39,8 +46,9 @@ export function AddExerciseModal({
       setSelectedExercise(null);
       setSets('3');
       setReps('10');
+      setRestSeconds(String(defaultRestSeconds));
     }
-  }, [open]);
+  }, [defaultRestSeconds, open]);
 
   // Filter exercises when search query changes
   useEffect(() => {
@@ -92,17 +100,18 @@ export function AddExerciseModal({
   }, [excludeExerciseIds]);
 
   const handleAddExercise = () => {
-    if (!selectedExercise) return;
+    if (!selectedExercise || !isValidSets || !isValidReps || !isValidRest) return;
 
     const targetSets = parseInt(sets, 10) || 3;
     const targetReps = reps || '10'; // Keep as string for ranges like "8-12"
+    const targetRestSeconds = parseInt(restSeconds, 10) || defaultRestSeconds;
 
     onAddExercise({
       exerciseId: selectedExercise.id,
       exercise: selectedExercise,
       targetSets,
       targetReps,
-      restSeconds: 90,
+      restSeconds: targetRestSeconds,
       workoutDayId: '', // Will be set by the parent
     });
 
@@ -192,6 +201,16 @@ export function AddExerciseModal({
                       maxLength={3}
                     />
                   </View>
+                  <View className="flex-1">
+                    <Text className="text-sm font-medium text-muted-foreground mb-2">Rest (sec)</Text>
+                    <TextInput
+                      className="bg-muted/50 rounded-lg px-4 py-3 text-foreground text-center text-lg font-semibold border border-border"
+                      value={restSeconds}
+                      onChangeText={setRestSeconds}
+                      keyboardType="number-pad"
+                      maxLength={4}
+                    />
+                  </View>
                 </View>
               </View>
             </View>
@@ -245,9 +264,9 @@ export function AddExerciseModal({
           </View>
           <View className="flex-1">
             <Button 
-              className="bg-primary" 
+              className={cn('bg-primary', canAddExercise ? 'opacity-100' : 'opacity-50')} 
               onPress={handleAddExercise}
-              disabled={!selectedExercise}
+              disabled={!canAddExercise}
             >
               <Plus size={16} color="#FFFFFF" />
               <Text className="text-primary-foreground font-semibold ml-1">Add Exercise</Text>

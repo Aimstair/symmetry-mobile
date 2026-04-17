@@ -1,13 +1,12 @@
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback, useEffect, memo } from 'react';
 import { View, Text, ScrollView, Pressable, Dimensions, ActivityIndicator } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAppStore } from '@/store/useAppStore';
 import { supabase } from '@/lib/supabase';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
-import { EmptyState } from '@/components/ui/EmptyState';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   ArrowLeft, 
@@ -19,11 +18,12 @@ import {
   Calendar,
   Target,
   Camera,
-  Dumbbell,
 } from 'lucide-react-native';
 import { cn } from '@/lib/utils';
 import { LineChart } from 'react-native-gifted-charts';
 import type { PhysiqueScan } from '@/types';
+
+const MemoizedLineChart = memo(LineChart);
 
 const { width } = Dimensions.get('window');
 const chartWidth = width - 64;
@@ -66,7 +66,7 @@ function transformToChartData(scans: PhysiqueScan[]) {
     new Date(a.date).getTime() - new Date(b.date).getTime()
   );
   
-  return sorted.map((scan, index) => ({
+  return sorted.map((scan) => ({
     value: scan.symmetryScore,
     label: formatChartDate(scan.date),
     date: scan.date,
@@ -161,6 +161,7 @@ function countMusclesByStatus(muscleScores: PhysiqueScan['muscleScores']) {
 
 export default function SymmetryHistory() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState('overview');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
 
@@ -267,6 +268,32 @@ export default function SymmetryHistory() {
   const muscleAnalysis = useMemo(() => getCurrentMuscleAnalysis(physiqueScans), [physiqueScans]);
   const muscleHistory = useMemo(() => getMuscleHistoryData(physiqueScans), [physiqueScans]);
 
+  const renderOverviewPointerLabel = useCallback(
+    (items: any) => (
+      <View className="bg-card border border-primary rounded-lg px-3 py-2">
+        <Text className="text-sm text-primary font-bold">Score: {items[0].value}</Text>
+        <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
+      </View>
+    ),
+    []
+  );
+
+  const overviewPointerConfig = useMemo(
+    () => ({
+      pointerStripHeight: 180,
+      pointerStripColor: '#31D5E3',
+      pointerStripWidth: 2,
+      pointerColor: '#31D5E3',
+      radius: 7,
+      pointerLabelWidth: 110,
+      pointerLabelHeight: 90,
+      activatePointersOnLongPress: true,
+      autoAdjustPointerLabelPosition: false,
+      pointerLabelComponent: renderOverviewPointerLabel,
+    }),
+    [renderOverviewPointerLabel]
+  );
+
   // Get current and first scan stats
   const latestScan = physiqueScans.length > 0 
     ? [...physiqueScans].sort((a, b) => 
@@ -353,8 +380,8 @@ export default function SymmetryHistory() {
 
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
-      <ScrollView className="flex-1">
-        <View className="px-4 py-6 pb-24">
+      <ScrollView className="flex-1" contentContainerStyle={{ paddingBottom: Math.max(8, insets.bottom) }}>
+        <View className="px-4">
           {/* Header */}
           <View className="flex-row items-center gap-3 mb-6">
             <Button 
@@ -454,7 +481,7 @@ export default function SymmetryHistory() {
                 </View>
                 <GlassCard className="p-0 overflow-hidden pb-4">
                   <View className="items-center justify-center pt-4">
-                    <LineChart
+                    <MemoizedLineChart
                       data={chartData}
                       curved
                       areaChart
@@ -479,25 +506,7 @@ export default function SymmetryHistory() {
                       rulesColor="#27272A"
                       noOfSections={5}
                       backgroundColor="transparent"
-                      pointerConfig={{
-                        pointerStripHeight: 180,
-                        pointerStripColor: '#31D5E3',
-                        pointerStripWidth: 2,
-                        pointerColor: '#31D5E3',
-                        radius: 7,
-                        pointerLabelWidth: 110,
-                        pointerLabelHeight: 90,
-                        activatePointersOnLongPress: true,
-                        autoAdjustPointerLabelPosition: false,
-                        pointerLabelComponent: (items: any) => {
-                          return (
-                            <View className="bg-card border border-primary rounded-lg px-3 py-2">
-                              <Text className="text-sm text-primary font-bold">Score: {items[0].value}</Text>
-                              <Text className="text-xs text-muted-foreground">{items[0].label}</Text>
-                            </View>
-                          );
-                        },
-                      }}
+                      pointerConfig={overviewPointerConfig}
                     />
                   </View>
                 </GlassCard>
@@ -578,7 +587,7 @@ export default function SymmetryHistory() {
                   <GlassCard className="py-3">
                     <View className="h-24">
                       {data.length > 0 && (
-                        <LineChart
+                        <MemoizedLineChart
                           data={data}
                           curved
                           areaChart

@@ -9,6 +9,7 @@
  * - Workout History: Full session tracking with exercises and sets
  * - Body Measurements: Atomic normalized columns
  * - Type-safe queries with TypeScript
+ * - Offline-first: Queue operations when offline
  * 
  * Configuration:
  * - Local: http://127.0.0.1:54321 (via EXPO_PUBLIC_SUPABASE_URL)
@@ -17,6 +18,8 @@
 
 import { supabase } from '@/lib/supabase';
 import { storageAdapter } from '@/lib/storage';
+import { syncManager } from '@/lib/syncManager';
+import { isAbortError } from '@/lib/utils';
 import type {
   IDataService,
   IExerciseService,
@@ -46,10 +49,29 @@ import type {
   CreateWorkoutPlanInput,
   SaveWorkoutSessionInput,
   ScheduledWorkout,
-  TrainingDaysHistory,
   WorkoutDaySnapshot,
   ScheduleStatus,
 } from '@/types';
+
+// ============================================================================
+// UUID GENERATION HELPER
+// ============================================================================
+
+/**
+ * Generate a UUID v4 for offline operations
+ * Uses crypto.randomUUID when available, falls back to manual implementation
+ */
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback for environments without crypto.randomUUID
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 // ============================================================================
 // CACHE KEYS
@@ -67,7 +89,23 @@ const CACHE_KEYS = {
 class CloudExerciseService implements IExerciseService {
   private exerciseCache: Map<string, CatalogExercise> = new Map();
   private alternativesCache: Map<string, string[]> = new Map();
+  private cacheMetadata: ExerciseCacheMetadata | null = null;
   private isInitialized = false;
+
+  private toDate(value: unknown, fallback: Date): Date {
+    if (value instanceof Date && !isNaN(value.getTime())) {
+      return value;
+    }
+
+    if (typeof value === 'string' || typeof value === 'number') {
+      const parsed = new Date(value);
+      if (!isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+
+    return fallback;
+  }
 
   /**
    * Initialize cache from storage
@@ -76,51 +114,66 @@ class CloudExerciseService implements IExerciseService {
     if (this.isInitialized) return;
 
     try {
-      const cachedData = storageAdapter.getItem(CACHE_KEYS.EXERCISES);
+      const cachedData = await storageAdapter.getItem(CACHE_KEYS.EXERCISES);
       if (cachedData) {
         const exercises: CatalogExercise[] = JSON.parse(cachedData);
         exercises.forEach((ex) => {
           this.exerciseCache.set(ex.id, {
             ...ex,
-            createdAt: new Date(ex.createdAt),
-            updatedAt: new Date(ex.updatedAt),
+            createdAt: this.toDate(ex.createdAt, new Date()),
+            updatedAt: this.toDate(ex.updatedAt, new Date()),
           });
         });
       }
 
-      const cachedAlternatives = storageAdapter.getItem(CACHE_KEYS.ALTERNATIVES);
+      const cachedAlternatives = await storageAdapter.getItem(CACHE_KEYS.ALTERNATIVES);
       if (cachedAlternatives) {
         const alternatives: Record<string, string[]> = JSON.parse(cachedAlternatives);
         Object.entries(alternatives).forEach(([key, value]) => {
-          this.alternativesCache.set(key, value);
+          if (Array.isArray(value)) {
+            this.alternativesCache.set(key, value);
+          }
         });
+      }
+
+      const metadataStr = await storageAdapter.getItem(CACHE_KEYS.EXERCISES_METADATA);
+      if (metadataStr) {
+        const metadata = JSON.parse(metadataStr);
+        this.cacheMetadata = {
+          lastSyncedAt: this.toDate(metadata.lastSyncedAt, new Date(0)),
+          exerciseCount: Number(metadata.exerciseCount) || this.exerciseCache.size,
+        };
       }
 
       this.isInitialized = true;
     } catch (error) {
       console.error('Failed to initialize exercise cache:', error);
+      this.exerciseCache.clear();
+      this.alternativesCache.clear();
+      this.cacheMetadata = null;
     }
   }
 
   /**
    * Save cache to storage
    */
-  private saveCache(): void {
+  private async saveCache(): Promise<void> {
     try {
       const exercises = Array.from(this.exerciseCache.values());
-      storageAdapter.setItem(CACHE_KEYS.EXERCISES, JSON.stringify(exercises));
+      await storageAdapter.setItem(CACHE_KEYS.EXERCISES, JSON.stringify(exercises));
 
       const alternatives: Record<string, string[]> = {};
       this.alternativesCache.forEach((value, key) => {
         alternatives[key] = value;
       });
-      storageAdapter.setItem(CACHE_KEYS.ALTERNATIVES, JSON.stringify(alternatives));
+      await storageAdapter.setItem(CACHE_KEYS.ALTERNATIVES, JSON.stringify(alternatives));
 
       const metadata: ExerciseCacheMetadata = {
         lastSyncedAt: new Date(),
         exerciseCount: exercises.length,
       };
-      storageAdapter.setItem(CACHE_KEYS.EXERCISES_METADATA, JSON.stringify(metadata));
+      this.cacheMetadata = metadata;
+      await storageAdapter.setItem(CACHE_KEYS.EXERCISES_METADATA, JSON.stringify(metadata));
     } catch (error) {
       console.error('Failed to save exercise cache:', error);
     }
@@ -156,7 +209,9 @@ class CloudExerciseService implements IExerciseService {
           .gt('updated_at', lastSyncedAt.toISOString());
 
         if (error) {
-          console.warn('Failed to fetch exercise updates:', error.message);
+          if (!isAbortError(error)) {
+            console.warn('Failed to fetch exercise updates:', error.message);
+          }
         } else if (data && data.length > 0) {
           // Merge updates into cache
           data.forEach((row) => {
@@ -167,9 +222,11 @@ class CloudExerciseService implements IExerciseService {
         }
       }
 
-      this.saveCache();
+      await this.saveCache();
     } catch (error) {
-      console.error('Exercise sync error:', error);
+      if (!isAbortError(error)) {
+        console.error('Exercise sync error:', error);
+      }
       // Return cached data even if sync fails
     }
 
@@ -255,24 +312,31 @@ class CloudExerciseService implements IExerciseService {
     // Clear cache
     this.exerciseCache.clear();
     this.alternativesCache.clear();
-    storageAdapter.removeItem(CACHE_KEYS.EXERCISES);
-    storageAdapter.removeItem(CACHE_KEYS.ALTERNATIVES);
-    storageAdapter.removeItem(CACHE_KEYS.EXERCISES_METADATA);
+    this.cacheMetadata = null;
+    await storageAdapter.removeItem(CACHE_KEYS.EXERCISES);
+    await storageAdapter.removeItem(CACHE_KEYS.ALTERNATIVES);
+    await storageAdapter.removeItem(CACHE_KEYS.EXERCISES_METADATA);
 
     // Fetch fresh
     await this.getExercises();
   }
 
   getCacheMetadata(): ExerciseCacheMetadata | null {
+    if (this.cacheMetadata) {
+      return this.cacheMetadata;
+    }
+
     try {
       const metadataStr = storageAdapter.getItem(CACHE_KEYS.EXERCISES_METADATA);
+      if (typeof metadataStr !== 'string') return null;
       if (!metadataStr) return null;
 
       const metadata = JSON.parse(metadataStr);
-      return {
+      this.cacheMetadata = {
         lastSyncedAt: new Date(metadata.lastSyncedAt),
         exerciseCount: metadata.exerciseCount,
       };
+      return this.cacheMetadata;
     } catch {
       return null;
     }
@@ -284,7 +348,9 @@ class CloudExerciseService implements IExerciseService {
       .select('exercise_id, alternative_id');
 
     if (error) {
-      console.warn('Failed to fetch alternatives:', error.message);
+      if (!isAbortError(error)) {
+        console.warn('Failed to fetch alternatives:', error.message);
+      }
       return;
     }
 
@@ -410,7 +476,96 @@ class CloudWorkoutService implements IWorkoutService {
       return localPlan;
     }
     
-    // Transaction: Create Plan -> Create Days -> Exercises
+    // Check if offline - queue operation and return optimistic result
+    if (!syncManager.isNetworkOnline()) {
+      const tempPlanId = generateUUID();
+      const now = new Date();
+      
+      // Build optimistic plan with temporary UUIDs
+      const optimisticPlan: WorkoutPlan = {
+        id: tempPlanId,
+        userId: input.userId,
+        name: input.name,
+        description: input.description,
+        type: input.type,
+        daysPerWeek: input.daysPerWeek,
+        workoutDays: input.workoutDays.map((day, dayIndex) => {
+          const dayId = generateUUID();
+          return {
+            id: dayId,
+            planId: tempPlanId,
+            orderIndex: dayIndex,
+            name: day.name,
+            muscleGroups: day.muscleGroups,
+            exercises: day.exercises.map((ex, exIndex) => ({
+              id: generateUUID(),
+              workoutDayId: dayId,
+              exerciseId: ex.exerciseId,
+              orderIndex: exIndex,
+              targetSets: ex.targetSets,
+              targetReps: ex.targetReps,
+              restSeconds: ex.restSeconds,
+              notes: ex.notes,
+              createdAt: now,
+              updatedAt: now,
+            })),
+            createdAt: now,
+            updatedAt: now,
+          };
+        }),
+        createdAt: now,
+        updatedAt: now,
+      };
+      
+      // Queue the plan insert
+      await syncManager.queueOperation('INSERT', 'workout_plans', tempPlanId, {
+        id: tempPlanId,
+        user_id: input.userId,
+        name: input.name,
+        description: input.description,
+        type: input.type,
+        days_per_week: input.daysPerWeek,
+        workout_days: [],
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      });
+      
+      // Queue days and exercises
+      for (const day of optimisticPlan.workoutDays) {
+        await syncManager.queueOperation('INSERT', 'workout_days', day.id, {
+          id: day.id,
+          plan_id: tempPlanId,
+          order_index: day.orderIndex,
+          name: day.name,
+          muscle_groups: day.muscleGroups,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        });
+        
+        for (const ex of day.exercises) {
+          await syncManager.queueOperation('INSERT', 'plan_exercises', ex.id, {
+            id: ex.id,
+            workout_day_id: day.id,
+            exercise_id: ex.exerciseId,
+            order_index: ex.orderIndex,
+            target_sets: ex.targetSets,
+            target_reps: ex.targetReps,
+            rest_seconds: ex.restSeconds,
+            notes: ex.notes,
+            created_at: now.toISOString(),
+            updated_at: now.toISOString(),
+          });
+        }
+      }
+      
+      if (__DEV__) {
+        console.log('📴 Offline: Queued workout plan for sync:', tempPlanId);
+      }
+      
+      return optimisticPlan;
+    }
+    
+    // ONLINE: Use bulk inserts for better performance
     
     // 1. Create the plan
     const { data: planData, error: planError } = await supabase
@@ -428,41 +583,52 @@ class CloudWorkoutService implements IWorkoutService {
 
     if (planError) throw new Error(`Failed to create workout plan: ${planError.message}`);
 
-    // 2. Create workout days
+    // 2. Bulk insert workout days
+    const daysToInsert = input.workoutDays.map((dayInput, dayIndex) => ({
+      plan_id: planData.id,
+      order_index: dayIndex,
+      name: dayInput.name,
+      muscle_groups: dayInput.muscleGroups,
+    }));
+    
+    const { data: daysData, error: daysError } = await supabase
+      .from('workout_days')
+      .insert(daysToInsert)
+      .select();
+
+    if (daysError) throw new Error(`Failed to create workout days: ${daysError.message}`);
+    
+    // Sort days by order_index to ensure correct mapping
+    const sortedDays = (daysData || []).sort((a, b) => a.order_index - b.order_index);
+
+    // 3. Bulk insert all exercises with correct day ID mappings
+    const exercisesToInsert: any[] = [];
     for (let dayIndex = 0; dayIndex < input.workoutDays.length; dayIndex++) {
       const dayInput = input.workoutDays[dayIndex];
-
-      const { data: dayData, error: dayError } = await supabase
-        .from('workout_days')
-        .insert({
-          plan_id: planData.id,
-          order_index: dayIndex,
-          name: dayInput.name,
-          muscle_groups: dayInput.muscleGroups,
-        })
-        .select()
-        .single();
-
-      if (dayError) throw new Error(`Failed to create workout day: ${dayError.message}`);
-
-      // 3. Create exercises for this day
+      const dayId = sortedDays[dayIndex]?.id;
+      
+      if (!dayId) continue;
+      
       for (let exIndex = 0; exIndex < dayInput.exercises.length; exIndex++) {
         const exInput = dayInput.exercises[exIndex];
-
-        const { error: exError } = await supabase
-          .from('plan_exercises')
-          .insert({
-            workout_day_id: dayData.id,
-            exercise_id: exInput.exerciseId,
-            order_index: exIndex,
-            target_sets: exInput.targetSets,
-            target_reps: exInput.targetReps,
-            rest_seconds: exInput.restSeconds,
-            notes: exInput.notes,
-          });
-
-        if (exError) throw new Error(`Failed to create plan exercise: ${exError.message}`);
+        exercisesToInsert.push({
+          workout_day_id: dayId,
+          exercise_id: exInput.exerciseId,
+          order_index: exIndex,
+          target_sets: exInput.targetSets,
+          target_reps: exInput.targetReps,
+          rest_seconds: exInput.restSeconds,
+          notes: exInput.notes,
+        });
       }
+    }
+    
+    if (exercisesToInsert.length > 0) {
+      const { error: exError } = await supabase
+        .from('plan_exercises')
+        .insert(exercisesToInsert);
+
+      if (exError) throw new Error(`Failed to create plan exercises: ${exError.message}`);
     }
 
     // Fetch the complete plan with nested data
@@ -486,6 +652,89 @@ class CloudWorkoutService implements IWorkoutService {
     if (updates.description !== undefined) dbUpdates.description = updates.description;
     if (updates.type) dbUpdates.type = updates.type;
     if (updates.daysPerWeek) dbUpdates.days_per_week = updates.daysPerWeek;
+
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+
+      await syncManager.queueOperation(
+        'UPDATE',
+        'workout_plans',
+        id,
+        {
+          id,
+          ...dbUpdates,
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      if (updates.workoutDays) {
+        for (let dayIndex = 0; dayIndex < updates.workoutDays.length; dayIndex++) {
+          const day = updates.workoutDays[dayIndex];
+          const dayId = day.id || generateUUID();
+
+          await syncManager.queueOperation(
+            'UPDATE',
+            'workout_days',
+            dayId,
+            {
+              id: dayId,
+              plan_id: id,
+              order_index: dayIndex,
+              name: day.name,
+              day_name: day.dayName || null,
+              muscle_groups: day.muscleGroups,
+              updated_at: now.toISOString(),
+            },
+            {
+              priority: 'high',
+              clientUpdatedAt: now,
+            }
+          );
+
+          for (let exIndex = 0; exIndex < day.exercises.length; exIndex++) {
+            const ex = day.exercises[exIndex];
+            const exerciseId = ex.id || generateUUID();
+
+            await syncManager.queueOperation(
+              'UPDATE',
+              'plan_exercises',
+              exerciseId,
+              {
+                id: exerciseId,
+                workout_day_id: dayId,
+                exercise_id: ex.exerciseId,
+                order_index: exIndex,
+                target_sets: ex.targetSets,
+                target_reps: ex.targetReps,
+                rest_seconds: ex.restSeconds,
+                notes: ex.notes,
+                updated_at: now.toISOString(),
+              },
+              {
+                priority: 'high',
+                clientUpdatedAt: now,
+              }
+            );
+          }
+        }
+      }
+
+      return {
+        id,
+        userId: updates.userId || '',
+        name: updates.name || 'Workout Plan',
+        description: updates.description || '',
+        type: updates.type || 'custom',
+        daysPerWeek: updates.daysPerWeek || updates.workoutDays?.length || 0,
+        workoutDays: updates.workoutDays || [],
+        createdAt: updates.createdAt || now,
+        updatedAt: now,
+      };
+    }
 
     const { error } = await supabase
       .from('workout_plans')
@@ -545,6 +794,14 @@ class CloudWorkoutService implements IWorkoutService {
       return;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation('DELETE', 'workout_plans', id, { id }, {
+        priority: 'high',
+        clientUpdatedAt: new Date(),
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('workout_plans')
       .delete()
@@ -569,6 +826,78 @@ class CloudWorkoutService implements IWorkoutService {
       return localDay;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      const dayId = generateUUID();
+      const optimisticExercises: PlanExercise[] = (day.exercises || []).map((ex, exIndex) => ({
+        id: generateUUID(),
+        workoutDayId: dayId,
+        exerciseId: ex.exerciseId,
+        orderIndex: exIndex,
+        targetSets: ex.targetSets,
+        targetReps: ex.targetReps,
+        restSeconds: ex.restSeconds,
+        notes: ex.notes,
+      }));
+
+      await syncManager.queueOperation(
+        'INSERT',
+        'workout_days',
+        dayId,
+        {
+          id: dayId,
+          plan_id: planId,
+          order_index: day.orderIndex,
+          name: day.name,
+          day_name: day.dayName || null,
+          muscle_groups: day.muscleGroups,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      for (let exIndex = 0; exIndex < optimisticExercises.length; exIndex++) {
+        const ex = optimisticExercises[exIndex];
+        await syncManager.queueOperation(
+          'INSERT',
+          'plan_exercises',
+          ex.id,
+          {
+            id: ex.id,
+            workout_day_id: dayId,
+            exercise_id: ex.exerciseId,
+            order_index: exIndex,
+            target_sets: ex.targetSets,
+            target_reps: ex.targetReps,
+            rest_seconds: ex.restSeconds,
+            notes: ex.notes,
+            created_at: now.toISOString(),
+            updated_at: now.toISOString(),
+          },
+          {
+            priority: 'high',
+            clientUpdatedAt: now,
+          }
+        );
+      }
+
+      return {
+        id: dayId,
+        planId,
+        orderIndex: day.orderIndex,
+        name: day.name,
+        dayName: day.dayName,
+        muscleGroups: day.muscleGroups,
+        exercises: optimisticExercises,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('workout_days')
       .insert({
@@ -603,6 +932,64 @@ class CloudWorkoutService implements IWorkoutService {
     if (updates.muscleGroups) dbUpdates.muscle_groups = updates.muscleGroups;
     if (updates.dayName !== undefined) dbUpdates.day_name = updates.dayName;
 
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+
+      await syncManager.queueOperation(
+        'UPDATE',
+        'workout_days',
+        dayId,
+        {
+          id: dayId,
+          ...dbUpdates,
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      if (updates.exercises) {
+        for (let exIndex = 0; exIndex < updates.exercises.length; exIndex++) {
+          const ex = updates.exercises[exIndex];
+          const exerciseId = ex.id || generateUUID();
+          await syncManager.queueOperation(
+            'UPDATE',
+            'plan_exercises',
+            exerciseId,
+            {
+              id: exerciseId,
+              workout_day_id: dayId,
+              exercise_id: ex.exerciseId,
+              order_index: exIndex,
+              target_sets: ex.targetSets,
+              target_reps: ex.targetReps,
+              rest_seconds: ex.restSeconds,
+              notes: ex.notes,
+              updated_at: now.toISOString(),
+            },
+            {
+              priority: 'high',
+              clientUpdatedAt: now,
+            }
+          );
+        }
+      }
+
+      return {
+        id: dayId,
+        planId: updates.planId || '',
+        orderIndex: updates.orderIndex || 0,
+        name: updates.name || '',
+        dayName: updates.dayName,
+        muscleGroups: updates.muscleGroups || [],
+        exercises: updates.exercises || [],
+        createdAt: updates.createdAt || now,
+        updatedAt: now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('workout_days')
       .update(dbUpdates)
@@ -622,6 +1009,14 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async deleteWorkoutDay(dayId: string): Promise<void> {
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation('DELETE', 'workout_days', dayId, { id: dayId }, {
+        priority: 'high',
+        clientUpdatedAt: new Date(),
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('workout_days')
       .delete()
@@ -631,6 +1026,44 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async addPlanExercise(dayId: string, exercise: Omit<PlanExercise, 'id' | 'workoutDayId'>): Promise<PlanExercise> {
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      const exerciseId = generateUUID();
+
+      await syncManager.queueOperation(
+        'INSERT',
+        'plan_exercises',
+        exerciseId,
+        {
+          id: exerciseId,
+          workout_day_id: dayId,
+          exercise_id: exercise.exerciseId,
+          order_index: exercise.orderIndex,
+          target_sets: exercise.targetSets,
+          target_reps: exercise.targetReps,
+          rest_seconds: exercise.restSeconds,
+          notes: exercise.notes,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id: exerciseId,
+        workoutDayId: dayId,
+        exerciseId: exercise.exerciseId,
+        orderIndex: exercise.orderIndex,
+        targetSets: exercise.targetSets,
+        targetReps: exercise.targetReps,
+        restSeconds: exercise.restSeconds,
+        notes: exercise.notes,
+      };
+    }
+
     const { data, error } = await supabase
       .from('plan_exercises')
       .insert({
@@ -661,6 +1094,35 @@ class CloudWorkoutService implements IWorkoutService {
     if (updates.restSeconds !== undefined) dbUpdates.rest_seconds = updates.restSeconds;
     if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
 
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'plan_exercises',
+        exerciseId,
+        {
+          id: exerciseId,
+          ...dbUpdates,
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id: exerciseId,
+        workoutDayId: updates.workoutDayId || '',
+        exerciseId: updates.exerciseId || '',
+        orderIndex: updates.orderIndex || 0,
+        targetSets: updates.targetSets || 0,
+        targetReps: updates.targetReps || '',
+        restSeconds: updates.restSeconds || 0,
+        notes: updates.notes,
+      };
+    }
+
     const { data, error } = await supabase
       .from('plan_exercises')
       .update(dbUpdates)
@@ -677,6 +1139,14 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async deletePlanExercise(exerciseId: string): Promise<void> {
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation('DELETE', 'plan_exercises', exerciseId, { id: exerciseId }, {
+        priority: 'high',
+        clientUpdatedAt: new Date(),
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('plan_exercises')
       .delete()
@@ -686,6 +1156,28 @@ class CloudWorkoutService implements IWorkoutService {
   }
 
   async reorderPlanExercises(dayId: string, exerciseIds: string[]): Promise<void> {
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      for (let i = 0; i < exerciseIds.length; i++) {
+        await syncManager.queueOperation(
+          'UPDATE',
+          'plan_exercises',
+          exerciseIds[i],
+          {
+            id: exerciseIds[i],
+            workout_day_id: dayId,
+            order_index: i,
+            updated_at: now.toISOString(),
+          },
+          {
+            priority: 'high',
+            clientUpdatedAt: now,
+          }
+        );
+      }
+      return;
+    }
+
     // Update order_index for each exercise
     for (let i = 0; i < exerciseIds.length; i++) {
       const { error } = await supabase
@@ -762,6 +1254,19 @@ class CloudWorkoutService implements IWorkoutService {
 
 class CloudHistoryService implements IHistoryService {
   async saveWorkoutSession(input: SaveWorkoutSessionInput): Promise<WorkoutSession> {
+    const startedAt = input.startedAt instanceof Date ? input.startedAt : new Date(input.startedAt as any);
+    const endedAt = input.endedAt
+      ? (input.endedAt instanceof Date ? input.endedAt : new Date(input.endedAt as any))
+      : undefined;
+
+    if (Number.isNaN(startedAt.getTime())) {
+      throw new Error('Invalid workout start time');
+    }
+
+    if (endedAt && Number.isNaN(endedAt.getTime())) {
+      throw new Error('Invalid workout end time');
+    }
+
     // Skip cloud save for guest users - return a local session
     if (input.userId.startsWith('guest-')) {
       const sessionId = `session-${Date.now()}`;
@@ -771,9 +1276,9 @@ class CloudHistoryService implements IHistoryService {
         planId: input.planId,
         workoutDayId: input.workoutDayId,
         name: input.name,
-        startedAt: input.startedAt,
-        endedAt: input.endedAt,
-        durationSeconds: input.endedAt ? Math.floor((input.endedAt.getTime() - input.startedAt.getTime()) / 1000) : undefined,
+        startedAt,
+        endedAt,
+        durationSeconds: endedAt ? Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000) : undefined,
         notes: input.notes,
         warmupMode: input.warmupMode,
         deloadMode: input.deloadMode,
@@ -806,10 +1311,105 @@ class CloudHistoryService implements IHistoryService {
     
     // Calculate duration if both times provided
     let durationSeconds: number | undefined;
-    if (input.startedAt && input.endedAt) {
-      durationSeconds = Math.floor((input.endedAt.getTime() - input.startedAt.getTime()) / 1000);
+    if (endedAt) {
+      durationSeconds = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
     }
 
+    // Check if offline - queue operation and return optimistic result
+    if (!syncManager.isNetworkOnline()) {
+      const tempSessionId = generateUUID();
+      const now = new Date();
+      
+      // Build optimistic session with temporary UUIDs
+      const optimisticSession: WorkoutSession = {
+        id: tempSessionId,
+        userId: input.userId,
+        planId: input.planId,
+        workoutDayId: input.workoutDayId,
+        name: input.name,
+        startedAt,
+        endedAt,
+        durationSeconds: durationSeconds,
+        notes: input.notes,
+        warmupMode: input.warmupMode,
+        deloadMode: input.deloadMode,
+        exercises: input.exercises.map((ex, exIndex) => {
+          const sessionExId = generateUUID();
+          return {
+            id: sessionExId,
+            sessionId: tempSessionId,
+            exerciseId: ex.exerciseId,
+            orderIndex: exIndex,
+            notes: ex.notes,
+            sets: ex.sets.map((set, setIndex) => ({
+              id: generateUUID(),
+              sessionExerciseId: sessionExId,
+              setNumber: setIndex + 1,
+              weight: set.weight,
+              reps: set.reps,
+              rpe: set.rpe,
+              isWarmup: set.isWarmup,
+              isCompleted: set.isCompleted,
+              restTakenSeconds: set.restTakenSeconds,
+              createdAt: now,
+            })),
+          };
+        }),
+        createdAt: now,
+      };
+      
+      // Queue the session insert
+      await syncManager.queueOperation('INSERT', 'workout_sessions', tempSessionId, {
+        id: tempSessionId,
+        user_id: input.userId,
+        plan_id: input.planId,
+        workout_day_id: input.workoutDayId,
+        name: input.name,
+        started_at: startedAt.toISOString(),
+        ended_at: endedAt?.toISOString(),
+        duration_seconds: durationSeconds,
+        notes: input.notes,
+        warmup_mode: input.warmupMode,
+        deload_mode: input.deloadMode,
+        created_at: now.toISOString(),
+      });
+      
+      // Queue exercises and sets
+      for (const ex of optimisticSession.exercises) {
+        await syncManager.queueOperation('INSERT', 'session_exercises', ex.id, {
+          id: ex.id,
+          session_id: tempSessionId,
+          exercise_id: ex.exerciseId,
+          order_index: ex.orderIndex,
+          notes: ex.notes,
+          created_at: now.toISOString(),
+        });
+        
+        for (const set of ex.sets) {
+          await syncManager.queueOperation('INSERT', 'session_sets', set.id, {
+            id: set.id,
+            session_exercise_id: ex.id,
+            set_number: set.setNumber,
+            weight: set.weight,
+            reps: set.reps,
+            rpe: set.rpe,
+            is_warmup: set.isWarmup,
+            is_completed: set.isCompleted,
+            rest_taken_seconds: set.restTakenSeconds,
+            created_at: now.toISOString(),
+          });
+        }
+      }
+      
+      if (__DEV__) {
+        console.log('📴 Offline: Queued workout session for sync:', tempSessionId);
+      }
+      
+      return optimisticSession;
+    }
+
+    // ONLINE: Use bulk inserts for better performance
+    
     // 1. Create session
     const { data: sessionData, error: sessionError } = await supabase
       .from('workout_sessions')
@@ -818,8 +1418,8 @@ class CloudHistoryService implements IHistoryService {
         plan_id: input.planId,
         workout_day_id: input.workoutDayId,
         name: input.name,
-        started_at: input.startedAt.toISOString(),
-        ended_at: input.endedAt?.toISOString(),
+        started_at: startedAt.toISOString(),
+        ended_at: endedAt?.toISOString(),
         duration_seconds: durationSeconds,
         notes: input.notes,
         warmup_mode: input.warmupMode,
@@ -830,42 +1430,53 @@ class CloudHistoryService implements IHistoryService {
 
     if (sessionError) throw new Error(`Failed to save workout session: ${sessionError.message}`);
 
-    // 2. Create session exercises and sets
+    // 2. Bulk insert session exercises
+    const exercisesToInsert = input.exercises.map((exInput, exIndex) => ({
+      session_id: sessionData.id,
+      exercise_id: exInput.exerciseId,
+      order_index: exIndex,
+      notes: exInput.notes,
+    }));
+    
+    const { data: exercisesData, error: exError } = await supabase
+      .from('session_exercises')
+      .insert(exercisesToInsert)
+      .select();
+
+    if (exError) throw new Error(`Failed to save session exercises: ${exError.message}`);
+    
+    // Sort exercises by order_index to ensure correct mapping
+    const sortedExercises = (exercisesData || []).sort((a, b) => a.order_index - b.order_index);
+
+    // 3. Bulk insert all sets with correct exercise ID mappings
+    const setsToInsert: any[] = [];
     for (let exIndex = 0; exIndex < input.exercises.length; exIndex++) {
       const exInput = input.exercises[exIndex];
-
-      const { data: exData, error: exError } = await supabase
-        .from('session_exercises')
-        .insert({
-          session_id: sessionData.id,
-          exercise_id: exInput.exerciseId,
-          order_index: exIndex,
-          notes: exInput.notes,
-        })
-        .select()
-        .single();
-
-      if (exError) throw new Error(`Failed to save session exercise: ${exError.message}`);
-
-      // 3. Create sets for this exercise
+      const exerciseId = sortedExercises[exIndex]?.id;
+      
+      if (!exerciseId) continue;
+      
       for (let setIndex = 0; setIndex < exInput.sets.length; setIndex++) {
         const setInput = exInput.sets[setIndex];
-
-        const { error: setError } = await supabase
-          .from('session_sets')
-          .insert({
-            session_exercise_id: exData.id,
-            set_number: setIndex + 1,
-            weight: setInput.weight,
-            reps: setInput.reps,
-            rpe: setInput.rpe,
-            is_warmup: setInput.isWarmup,
-            is_completed: setInput.isCompleted,
-            rest_taken_seconds: setInput.restTakenSeconds,
-          });
-
-        if (setError) throw new Error(`Failed to save session set: ${setError.message}`);
+        setsToInsert.push({
+          session_exercise_id: exerciseId,
+          set_number: setIndex + 1,
+          weight: setInput.weight,
+          reps: setInput.reps,
+          rpe: setInput.rpe,
+          is_warmup: setInput.isWarmup,
+          is_completed: setInput.isCompleted,
+          rest_taken_seconds: setInput.restTakenSeconds,
+        });
       }
+    }
+    
+    if (setsToInsert.length > 0) {
+      const { error: setError } = await supabase
+        .from('session_sets')
+        .insert(setsToInsert);
+
+      if (setError) throw new Error(`Failed to save session sets: ${setError.message}`);
     }
 
     // Fetch complete session
@@ -1117,6 +1728,46 @@ class CloudProgressService implements IProgressService {
   }
 
   async addMeasurementLog(log: Omit<MeasurementLog, 'id' | 'createdAt'>): Promise<MeasurementLog> {
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      const id = generateUUID();
+      await syncManager.queueOperation(
+        'INSERT',
+        'measurement_logs',
+        id,
+        {
+          id,
+          user_id: log.userId,
+          date: log.date.toISOString(),
+          weight_kg: log.weightKg,
+          body_fat_pct: log.bodyFatPct,
+          chest_cm: log.chestCm,
+          waist_cm: log.waistCm,
+          hips_cm: log.hipsCm,
+          left_arm_cm: log.leftArmCm,
+          right_arm_cm: log.rightArmCm,
+          left_thigh_cm: log.leftThighCm,
+          right_thigh_cm: log.rightThighCm,
+          left_calf_cm: log.leftCalfCm,
+          right_calf_cm: log.rightCalfCm,
+          neck_cm: log.neckCm,
+          shoulders_cm: log.shouldersCm,
+          notes: log.notes,
+          created_at: now.toISOString(),
+        },
+        {
+          priority: 'normal',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id,
+        ...log,
+        createdAt: now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('measurement_logs')
       .insert({
@@ -1182,6 +1833,44 @@ class CloudProgressService implements IProgressService {
     if (updates.shouldersCm !== undefined) dbUpdates.shoulders_cm = updates.shouldersCm;
     if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
 
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'measurement_logs',
+        id,
+        {
+          id,
+          ...dbUpdates,
+        },
+        {
+          priority: 'normal',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id,
+        userId: updates.userId || '',
+        date: updates.date || now,
+        weightKg: updates.weightKg,
+        bodyFatPct: updates.bodyFatPct,
+        chestCm: updates.chestCm,
+        waistCm: updates.waistCm,
+        hipsCm: updates.hipsCm,
+        leftArmCm: updates.leftArmCm,
+        rightArmCm: updates.rightArmCm,
+        leftThighCm: updates.leftThighCm,
+        rightThighCm: updates.rightThighCm,
+        leftCalfCm: updates.leftCalfCm,
+        rightCalfCm: updates.rightCalfCm,
+        neckCm: updates.neckCm,
+        shouldersCm: updates.shouldersCm,
+        notes: updates.notes,
+        createdAt: updates.createdAt || now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('measurement_logs')
       .update(dbUpdates)
@@ -1214,6 +1903,14 @@ class CloudProgressService implements IProgressService {
   }
 
   async deleteMeasurementLog(id: string): Promise<void> {
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation('DELETE', 'measurement_logs', id, { id }, {
+        priority: 'normal',
+        clientUpdatedAt: new Date(),
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('measurement_logs')
       .delete()
@@ -1253,6 +1950,28 @@ class CloudProgressService implements IProgressService {
       return measurement;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation(
+        'INSERT',
+        'body_measurements',
+        measurement.id,
+        {
+          id: measurement.id,
+          user_id: measurement.userId,
+          date: measurement.date.toISOString(),
+          weight: measurement.weight,
+          body_fat: measurement.bodyFat,
+          measurements: measurement.measurements,
+        },
+        {
+          priority: 'normal',
+          clientUpdatedAt: measurement.date,
+        }
+      );
+
+      return measurement;
+    }
+
     const { data, error } = await supabase
       .from('body_measurements')
       .insert({
@@ -1309,6 +2028,29 @@ class CloudProgressService implements IProgressService {
       return scan;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation(
+        'INSERT',
+        'physique_scans',
+        scan.id,
+        {
+          id: scan.id,
+          user_id: scan.userId,
+          date: scan.date.toISOString(),
+          images: scan.images,
+          symmetry_score: scan.symmetryScore,
+          muscle_scores: scan.muscleScores,
+          notes: scan.notes,
+        },
+        {
+          priority: 'normal',
+          clientUpdatedAt: scan.date,
+        }
+      );
+
+      return scan;
+    }
+
     const { data, error } = await supabase
       .from('physique_scans')
       .insert({
@@ -1368,6 +2110,30 @@ class CloudProgressService implements IProgressService {
       return log;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation(
+        'INSERT',
+        'cardio_logs',
+        log.id,
+        {
+          id: log.id,
+          user_id: log.userId,
+          date: log.date.toISOString(),
+          type: log.type,
+          duration: log.duration,
+          distance: log.distance,
+          calories: log.calories,
+          notes: log.notes,
+        },
+        {
+          priority: 'normal',
+          clientUpdatedAt: log.date,
+        }
+      );
+
+      return log;
+    }
+
     const { data, error } = await supabase
       .from('cardio_logs')
       .insert({
@@ -1484,6 +2250,7 @@ class CloudUserService implements IUserService {
       goal: data.goal,
       experienceLevel: data.experience_level,
       trainingDays: data.training_days || [],
+      workoutsCompleted: data.workouts_completed ?? 0,
       createdAt: new Date(data.created_at),
       updatedAt: new Date(data.updated_at),
     };
@@ -1607,6 +2374,7 @@ class CloudUserService implements IUserService {
       goal: data.goal,
       experienceLevel: data.experience_level,
       trainingDays: data.training_days || [],
+      workoutsCompleted: data.workouts_completed ?? 0,
       createdAt: new Date(data.created_at),
       updatedAt: new Date(data.updated_at),
     };
@@ -1626,6 +2394,7 @@ class CloudUserService implements IUserService {
         goal: updates.goal || 'maintenance',
         experienceLevel: updates.experienceLevel || 'beginner',
         trainingDays: updates.trainingDays || [],
+        workoutsCompleted: updates.workoutsCompleted ?? 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -1641,6 +2410,39 @@ class CloudUserService implements IUserService {
     if (updates.goal) dbUpdates.goal = updates.goal;
     if (updates.experienceLevel) dbUpdates.experience_level = updates.experienceLevel;
     if (updates.trainingDays) dbUpdates.training_days = updates.trainingDays;
+
+    // Check if offline - queue operation and return optimistic result
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      
+      // Queue the update
+      await syncManager.queueOperation('UPDATE', 'users', userId, {
+        id: userId,
+        ...dbUpdates,
+        updated_at: now.toISOString(),
+      });
+      
+      if (__DEV__) {
+        console.log('📴 Offline: Queued user update for sync:', userId);
+      }
+      
+      // Return optimistic result
+      return {
+        id: userId,
+        name: updates.name || '',
+        email: updates.email || '',
+        age: updates.age || 0,
+        gender: updates.gender || 'male',
+        height: updates.height || 0,
+        weight: updates.weight || 0,
+        goal: updates.goal || 'maintenance',
+        experienceLevel: updates.experienceLevel || 'beginner',
+        trainingDays: updates.trainingDays || [],
+        workoutsCompleted: updates.workoutsCompleted ?? 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
 
     const { data, error } = await supabase
       .from('users')
@@ -1662,6 +2464,7 @@ class CloudUserService implements IUserService {
       goal: data.goal,
       experienceLevel: data.experience_level,
       trainingDays: data.training_days || [],
+      workoutsCompleted: data.workouts_completed ?? 0,
       createdAt: new Date(data.created_at),
       updatedAt: new Date(data.updated_at),
     };
@@ -1670,6 +2473,30 @@ class CloudUserService implements IUserService {
   async updateNutritionTargets(userId: string, targets: NutritionTargets): Promise<NutritionTargets> {
     // Skip cloud update for guest users - return the input as-is
     if (userId.startsWith('guest-')) {
+      return targets;
+    }
+
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'nutrition_targets',
+        userId,
+        {
+          user_id: userId,
+          calories: targets.calories,
+          protein: targets.protein,
+          carbs: targets.carbs,
+          fats: targets.fats,
+          tdee: targets.tdee,
+        },
+        {
+          priority: 'normal',
+          conflictTarget: 'user_id',
+          clientUpdatedAt: now,
+        }
+      );
+
       return targets;
     }
     
@@ -1698,6 +2525,35 @@ class CloudUserService implements IUserService {
   }
 
   async updateEquipment(userId: string, equipment: EquipmentProfile): Promise<EquipmentProfile> {
+    if (userId.startsWith('guest-')) {
+      return equipment;
+    }
+
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'equipment_profiles',
+        userId,
+        {
+          user_id: userId,
+          has_barbell: equipment.hasBarbell,
+          has_dumbbells: equipment.hasDumbbells,
+          has_cable_station: equipment.hasCableStation,
+          has_machines: equipment.hasMachines,
+          has_bands: equipment.hasBands,
+          custom_equipment: equipment.customEquipment,
+        },
+        {
+          priority: 'normal',
+          conflictTarget: 'user_id',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return equipment;
+    }
+
     const { data, error } = await supabase
       .from('equipment_profiles')
       .upsert({
@@ -1837,6 +2693,38 @@ class CloudScheduleService implements IScheduleService {
     
     const dateStr = date.toISOString().split('T')[0];
 
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'workout_schedule',
+        `${userId}:${dateStr}`,
+        {
+          user_id: userId,
+          scheduled_date: dateStr,
+          workout_plan_id: workoutPlanId,
+          workout_snapshot: workoutSnapshot,
+          status: 'scheduled',
+        },
+        {
+          priority: 'high',
+          conflictTarget: 'user_id,scheduled_date',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id: `offline-schedule-${Date.now()}`,
+        userId,
+        scheduledDate: date,
+        workoutPlanId: workoutPlanId ?? undefined,
+        workoutSnapshot,
+        status: 'scheduled',
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('workout_schedule')
       .upsert({
@@ -1890,6 +2778,35 @@ class CloudScheduleService implements IScheduleService {
       updates.session_id = sessionId;
     }
 
+    if (!syncManager.isNetworkOnline()) {
+      const now = new Date();
+      await syncManager.queueOperation(
+        'UPDATE',
+        'workout_schedule',
+        scheduleId,
+        {
+          id: scheduleId,
+          ...updates,
+          updated_at: now.toISOString(),
+        },
+        {
+          priority: 'high',
+          clientUpdatedAt: now,
+        }
+      );
+
+      return {
+        id: scheduleId,
+        userId: 'offline-user',
+        scheduledDate: new Date(),
+        status,
+        sessionId,
+        workoutSnapshot: { name: '', muscleGroups: [], exercises: [] },
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
     const { data, error } = await supabase
       .from('workout_schedule')
       .update(updates)
@@ -1914,6 +2831,14 @@ class CloudScheduleService implements IScheduleService {
       return;
     }
     
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation('DELETE', 'workout_schedule', scheduleId, { id: scheduleId }, {
+        priority: 'high',
+        clientUpdatedAt: new Date(),
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('workout_schedule')
       .delete()
@@ -1968,6 +2893,25 @@ class CloudScheduleService implements IScheduleService {
     const weekStart = new Date(now.setDate(diff));
     weekStart.setHours(0, 0, 0, 0);
     const weekStartStr = weekStart.toISOString().split('T')[0];
+
+    if (!syncManager.isNetworkOnline()) {
+      await syncManager.queueOperation(
+        'UPDATE',
+        'training_days_history',
+        `${userId}:${weekStartStr}`,
+        {
+          user_id: userId,
+          week_start: weekStartStr,
+          training_days: trainingDays,
+        },
+        {
+          priority: 'normal',
+          conflictTarget: 'user_id,week_start',
+          clientUpdatedAt: new Date(),
+        }
+      );
+      return;
+    }
 
     const { error } = await supabase
       .from('training_days_history')

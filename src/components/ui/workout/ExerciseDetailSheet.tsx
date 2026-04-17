@@ -1,14 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator } from 'react-native';
+import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator, Animated } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Video, ResizeMode } from 'expo-av';
 import { getVideoForExercise } from '@/lib/videoRegistry';
 import { useCachedVideo } from '@/lib/videoCaching';
 import {
-  Timer,
   Check,
-  Play,
   RefreshCw,
   History,
   ChevronRight,
@@ -35,6 +34,7 @@ interface SetData {
 
 interface ExerciseData {
   id: string;
+  catalogExerciseId?: string;
   name: string;
   targetSets: number;
   targetReps: string;
@@ -51,10 +51,12 @@ interface ExerciseDetailSheetProps {
   onSetComplete: (exerciseId: string, setId: number) => void;
   onInputChange: (exerciseId: string, setId: number, field: 'weight' | 'reps', value: string) => void;
   onSwapExercise: (exerciseId: string, newExerciseId: string, newName: string) => void;
+  onRestSecondsChange?: (exerciseId: string, catalogExerciseId: string, restSeconds: number) => void | Promise<void>;
   onViewHistory: (exerciseId: string) => void;
   onRemoveSet?: (exerciseId: string, setId: number) => void;
   unit: 'kg' | 'lbs';
   deloadMode: boolean;
+  isRestSecondsSaving?: boolean;
 }
 
 export function ExerciseDetailSheet({
@@ -64,20 +66,43 @@ export function ExerciseDetailSheet({
   onSetComplete,
   onInputChange,
   onSwapExercise,
+  onRestSecondsChange,
   onViewHistory,
   onRemoveSet,
   unit,
   deloadMode,
+  isRestSecondsSaving = false,
 }: ExerciseDetailSheetProps) {
+  const insets = useSafeAreaInsets();
   const [showSwapOptions, setShowSwapOptions] = useState(false);
+  const [restSecondsInput, setRestSecondsInput] = useState('');
+  const [restSecondsError, setRestSecondsError] = useState<string | null>(null);
+  const [restSecondsNotice, setRestSecondsNotice] = useState<string | null>(null);
   const [catalogExercise, setCatalogExercise] = useState<CatalogExercise | null>(null);
   const [alternatives, setAlternatives] = useState<CatalogExercise[]>([]);
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
   const videoRef = useRef<any>(null);
+  const sheetAnim = useRef(new Animated.Value(0)).current;
+  const lookupExerciseId = exercise?.catalogExerciseId || exercise?.id || '';
+  
+  // CRITICAL: Call useCachedVideo hook BEFORE any conditional returns to follow React's Rules of Hooks
+  const exerciseId = catalogExercise ? catalogExercise.id : lookupExerciseId;
+  const resolvedRegistrySource = (exerciseId ? getVideoForExercise(exerciseId) : null)
+    || (exercise?.name ? getVideoForExercise(exercise.name) : null);
+
+  const remoteVideoUrl = typeof resolvedRegistrySource === 'string' ? resolvedRegistrySource : null;
+  const { uri: videoUri, isLocal: isVideoCached, isLoading: isVideoLoading } = useCachedVideo(remoteVideoUrl);
+
+  const playbackSource =
+    typeof resolvedRegistrySource === 'number'
+      ? resolvedRegistrySource
+      : videoUri
+        ? { uri: videoUri }
+        : null;
   
   // Fetch exercise details and alternatives when exercise changes
   useEffect(() => {
-    if (!exercise || !isOpen) return;
+    if (!exercise || !isOpen || !lookupExerciseId) return;
     
     let mounted = true;
     
@@ -85,13 +110,13 @@ export function ExerciseDetailSheet({
       setIsLoadingDetails(true);
       try {
         // Fetch catalog exercise details
-        const catalogData = await dataService.exercise.getExercise(exercise.id);
+        const catalogData = await dataService.exercise.getExercise(lookupExerciseId);
         if (mounted && catalogData) {
           setCatalogExercise(catalogData);
         }
         
         // Fetch alternatives
-        const alts = await dataService.exercise.getAlternatives(exercise.id);
+        const alts = await dataService.exercise.getAlternatives(lookupExerciseId);
         if (mounted) {
           setAlternatives(alts);
         }
@@ -109,7 +134,7 @@ export function ExerciseDetailSheet({
     return () => {
       mounted = false;
     };
-  }, [exercise?.id, isOpen]);
+  }, [exercise?.id, exercise?.catalogExerciseId, isOpen, lookupExerciseId]);
 
   // Reset state when modal closes
   useEffect(() => {
@@ -119,6 +144,25 @@ export function ExerciseDetailSheet({
       setAlternatives([]);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!exercise) return;
+    setRestSecondsInput(String(exercise.restSeconds || 90));
+    setRestSecondsError(null);
+    setRestSecondsNotice(null);
+  }, [exercise?.id, exercise?.restSeconds]);
+
+  useEffect(() => {
+    if (isOpen) {
+      sheetAnim.setValue(0);
+      Animated.spring(sheetAnim, {
+        toValue: 1,
+        tension: 70,
+        friction: 10,
+        useNativeDriver: true,
+      }).start();
+    }
+  }, [isOpen, sheetAnim]);
   
   if (!exercise) return null;
 
@@ -130,32 +174,53 @@ export function ExerciseDetailSheet({
     formCues: catalogExercise?.formCues || ['Setup properly', 'Breathe consistently'],
     videoUrl: catalogExercise?.videoUrl,
   };
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-  
-  const exerciseId = catalogExercise ? catalogExercise.id : exercise.id;
-  const remoteVideoUrl = exerciseId ? getVideoForExercise(exerciseId) : null;
-  
-  // Use cached video hook for automatic local caching
-  const { uri: videoUri, isLocal: isVideoCached, isLoading: isVideoLoading } = useCachedVideo(remoteVideoUrl);
   
   // Debug: Log exercise ID to help match with video registry
-  if (__DEV__ && !remoteVideoUrl) {
+  if (__DEV__ && !resolvedRegistrySource) {
     console.log('🎥 No video found for exercise ID:', exerciseId, '| Exercise name:', exercise.name);
   }
+
+  const handleSaveRestSeconds = async () => {
+    if (!onRestSecondsChange || !exercise) return;
+
+    const parsed = parseInt(restSecondsInput.trim(), 10);
+    if (Number.isNaN(parsed) || parsed <= 0 || parsed > 1800) {
+      setRestSecondsError('Enter a value between 1 and 1800 seconds.');
+      setRestSecondsNotice(null);
+      return;
+    }
+
+    if (parsed === exercise.restSeconds) {
+      setRestSecondsError(null);
+      setRestSecondsNotice('Already set to this value.');
+      return;
+    }
+
+    setRestSecondsError(null);
+    setRestSecondsNotice(null);
+
+    try {
+      await onRestSecondsChange(exercise.id, exercise.catalogExerciseId || exercise.id, parsed);
+      setRestSecondsInput(String(parsed));
+      setRestSecondsNotice('Rest timer saved.');
+    } catch {
+      setRestSecondsError('Unable to sync right now. Changes are stored locally.');
+    }
+  };
 
   return (
     <Modal
       visible={isOpen}
-      animationType="slide"
+      animationType="none"
       transparent={true}
+      statusBarTranslucent
       onRequestClose={onClose}
     >
-      <View className="flex-1 bg-black/80">
+      <View className="flex-1">
+        <Animated.View
+          className="absolute inset-0 bg-black/80"
+          style={{ opacity: sheetAnim }}
+        />
         {/* Background overlay - tap to close */}
         <Pressable 
           className="flex-1" 
@@ -163,7 +228,20 @@ export function ExerciseDetailSheet({
         />
         
         {/* Bottom sheet content */}
-        <View className="h-[90%] bg-background rounded-t-3xl border-t border-border overflow-hidden">
+        <Animated.View
+          className="h-[90%] bg-background rounded-t-3xl border-t border-border overflow-hidden"
+          style={{
+            opacity: sheetAnim,
+            transform: [
+              {
+                translateY: sheetAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [140, 0],
+                }),
+              },
+            ],
+          }}
+        >
           {/* Sticky Header */}
           <View className="border-b border-border bg-card">
             <View className="flex-row items-center justify-between p-4 pb-2">
@@ -176,8 +254,11 @@ export function ExerciseDetailSheet({
             </View>
           </View>
   
-          <ScrollView className="flex-1">
-            <View className="p-4 gap-4 pb-8">
+          <ScrollView
+            className="flex-1"
+            contentContainerStyle={{ paddingBottom: Math.max(24, insets.bottom + 20) }}
+          >
+            <View className="p-4 gap-4">
               {/* Video/Animation Placeholder */}
               <GlassCard className="overflow-hidden p-0">
                 {isVideoLoading ? (
@@ -185,11 +266,11 @@ export function ExerciseDetailSheet({
                     <ActivityIndicator size="large" color="#31D5E3" />
                     <Text className="text-sm text-muted-foreground mt-3">Loading video...</Text>
                   </View>
-                ) : videoUri ? (
+                ) : playbackSource ? (
                   <View>
                     <Video
                       ref={videoRef}
-                      source={{ uri: videoUri }}
+                      source={playbackSource as any}
                       style={{ width: '100%', aspectRatio: 16 / 9 }}
                       resizeMode={ResizeMode.COVER}
                       useNativeControls={true}
@@ -197,7 +278,7 @@ export function ExerciseDetailSheet({
                       shouldPlay={true}
                       isMuted={true}
                     />
-                    {isVideoCached && (
+                    {typeof resolvedRegistrySource === 'string' && isVideoCached && (
                       <View className="absolute top-2 right-2 bg-success/80 px-2 py-1 rounded-full">
                         <Text className="text-xs text-white">Cached</Text>
                       </View>
@@ -267,6 +348,44 @@ export function ExerciseDetailSheet({
                 <View className="p-4 border-b border-border/50">
                   <Text className="font-semibold text-sm text-foreground">Log Sets</Text>
                   <Text className="text-xs text-muted-foreground">{exercise.targetSets} sets × {exercise.targetReps} reps</Text>
+                </View>
+
+                <View className="px-4 py-3 border-b border-border/30 bg-muted/20">
+                  <Text className="text-xs text-muted-foreground mb-2">Rest Between Sets (sec)</Text>
+                  <View className="flex-row items-center gap-2">
+                    <TextInput
+                      keyboardType="number-pad"
+                      value={restSecondsInput}
+                      onChangeText={(text) => {
+                        setRestSecondsInput(text);
+                        if (restSecondsError) {
+                          setRestSecondsError(null);
+                        }
+                      }}
+                      className="flex-1 h-10 text-center text-sm rounded border px-2 bg-background text-foreground border-border"
+                      placeholder="90"
+                      placeholderTextColor="#71717A"
+                    />
+                    <Button
+                      size="sm"
+                      onPress={() => {
+                        void handleSaveRestSeconds();
+                      }}
+                      disabled={isRestSecondsSaving || !onRestSecondsChange}
+                    >
+                      {isRestSecondsSaving ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text className="text-primary-foreground font-medium">Save</Text>
+                      )}
+                    </Button>
+                  </View>
+                  {restSecondsError && (
+                    <Text className="text-xs text-destructive mt-2">{restSecondsError}</Text>
+                  )}
+                  {!restSecondsError && restSecondsNotice && (
+                    <Text className="text-xs text-success mt-2">{restSecondsNotice}</Text>
+                  )}
                 </View>
                 
                 {/* Table Header */}
@@ -363,7 +482,7 @@ export function ExerciseDetailSheet({
                   <Button
                     variant="outline"
                     onPress={() => {
-                      onViewHistory(exercise.id);
+                      onViewHistory(exercise.catalogExerciseId || exercise.id);
                       onClose();
                     }}
                   >
@@ -423,7 +542,7 @@ export function ExerciseDetailSheet({
               )}
             </View>
           </ScrollView>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );

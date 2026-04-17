@@ -11,6 +11,67 @@
 import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 
+function getEventMessage(event: Sentry.Event): string {
+  return String(event.message || event.exception?.values?.[0]?.value || '').toLowerCase();
+}
+
+function containsNoiseToken(value: string): boolean {
+  return (
+    value.includes('abort') ||
+    value.includes('cancel') ||
+    value.includes('timeout') ||
+    value.includes('touch') ||
+    value.includes('gesture') ||
+    value.includes('userinteraction') ||
+    value.includes('user_interaction') ||
+    value.includes('[touchevents]') ||
+    value.includes('[userinteraction]')
+  );
+}
+
+function isNoiseEvent(event: Sentry.Event): boolean {
+  const message = getEventMessage(event);
+
+  if (containsNoiseToken(message)) {
+    return true;
+  }
+
+  const fingerprint = (event.fingerprint || []).join(' ').toLowerCase();
+  if (containsNoiseToken(fingerprint)) {
+    return true;
+  }
+
+  const tags = Object.values(event.tags || {})
+    .map((value) => String(value).toLowerCase())
+    .join(' ');
+  if (containsNoiseToken(tags)) {
+    return true;
+  }
+
+  const transaction = String(event.transaction || '').toLowerCase();
+  if (containsNoiseToken(transaction)) {
+    return true;
+  }
+
+  const spans = event.spans || [];
+  return spans.some((span) => {
+    const op = String(span.op || '').toLowerCase();
+    const description = String(span.description || '').toLowerCase();
+
+    if (containsNoiseToken(description)) {
+      return true;
+    }
+
+    return (
+      (op.includes('ui.') || op.includes('interaction')) &&
+      (description.includes('touch') ||
+        description.includes('gesture') ||
+        description.includes('userinteraction') ||
+        transaction.includes('userinteraction'))
+    );
+  });
+}
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -64,20 +125,30 @@ export function initializeSentry() {
     // Session timeout (seconds)
     sessionTrackingIntervalMillis: 30000,
     
-    // Attach stack traces to all messages
-    attachStacktrace: true,
+    // Stack traces are expensive in production when attached to every message.
+    attachStacktrace: __DEV__,
     
-    // Debug mode in development
-    debug: __DEV__,
+    // Debug logs can be enabled explicitly in dev when needed.
+    debug: __DEV__ && process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true',
     
-    // Don't send events in development unless explicitly testing
-    enabled: !__DEV__ || process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true',
+    // Keep enabled in dev for visibility, while dropping known interaction noise.
+    enabled: true,
     
     // Before send hook - can filter/modify events
-    beforeSend(event, hint) {
-      // Filter out certain errors if needed
+    beforeSend(event) {
+      if (__DEV__ && isNoiseEvent(event)) {
+        return null;
+      }
+
       if (__DEV__) {
         console.log('📊 Sentry event:', event.message || event.exception?.values?.[0]?.value);
+      }
+      return event;
+    },
+
+    beforeSendTransaction(event) {
+      if (__DEV__ && isNoiseEvent(event)) {
+        return null;
       }
       return event;
     },

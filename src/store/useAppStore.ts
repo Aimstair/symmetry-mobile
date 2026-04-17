@@ -6,6 +6,7 @@ import { isUsingCloudService } from '@/services/dataServiceProvider';
 import { localService } from '@/services/LocalService';
 import { subscriptionService } from '@/services/SubscriptionService';
 import { supabase } from '@/lib/supabase';
+import { DEFAULT_FRESHNESS_WINDOW_MS, isAbortError, isStaleTimestamp } from '@/lib/utils';
 import type {
   User,
   NutritionTargets,
@@ -56,7 +57,7 @@ async function trySyncToCloud<T>(
     // Only log sync failures for authenticated users
     if (!isGuest) {
       if (onError) onError(error);
-      else if (__DEV__) console.log('📴 Sync failed (will retry later):', error);
+      else if (__DEV__ && !isAbortError(error)) console.log('📴 Sync failed (will retry later):', error);
     }
     return null;
   }
@@ -135,6 +136,7 @@ interface AppState {
 
   // Actions - Settings
   updateSettings: (updates: Partial<AppSettings>) => void;
+  setDefaultRestSeconds: (seconds: number) => void;
   addBlacklistedExercise: (exerciseId: string) => void;
   removeBlacklistedExercise: (exerciseId: string) => void;
 
@@ -155,6 +157,8 @@ interface AppState {
   // Async Actions - Sync
   syncWorkoutPlanToCloud: (plan: WorkoutPlan) => Promise<WorkoutPlan>;
   syncUpdateWorkoutPlanToCloud: (id: string, updates: Partial<WorkoutPlan>) => Promise<WorkoutPlan>;
+  syncUpdateExerciseRestSecondsGlobally: (exerciseId: string, restSeconds: number) => Promise<void>;
+  syncUpdateExercisesRestSecondsGlobally: (exerciseIds: string[], restSeconds: number) => Promise<void>;
   syncDeleteWorkoutPlanFromCloud: (id: string) => Promise<void>;
   syncSwapExerciseToCloud: (planId: string, dayId: string, exerciseId: string, newExerciseId: string) => Promise<void>;
   syncAddExerciseToDayCloud: (planId: string, dayId: string, exercise: PlanExercise) => Promise<void>;
@@ -174,16 +178,19 @@ interface AppState {
   syncSaveWorkoutSession: (sessionData: any) => Promise<string | undefined>;
   syncMarkTodayWorkoutCompleted: (sessionId: string) => Promise<void>;
   syncEnsureTodaySchedule: (planId: string, daySnapshot: any) => Promise<void>;
-  syncFetchWorkoutHistory: () => Promise<void>;
+  syncFetchWorkoutHistory: (options?: { force?: boolean }) => Promise<void>;
   syncGuestDataToCloud: (authenticatedUser: { id: string; email: string }) => Promise<void>;
   
   updateActiveWorkout: (updates: Partial<ActiveWorkoutState>) => void;
 }
 
 const initialSettings: AppSettings = {
+  workoutReminderHour: 19,
+  workoutReminderMinute: 0,
   theme: 'dark',
   unit: 'lbs',
   measurementUnit: 'in',
+  defaultRestSeconds: 90,
   notifications: {
     workoutReminders: true,
     restTimerSound: true,
@@ -213,6 +220,100 @@ const initialActiveWorkout: ActiveWorkoutState = {
   },
   exerciseSets: {},
 };
+
+const workoutHistoryFetchedAtByUser = new Map<string, number>();
+
+function invalidateWorkoutHistoryCache(userId?: string | null): void {
+  if (!userId) return;
+  workoutHistoryFetchedAtByUser.delete(userId);
+}
+
+function markWorkoutHistoryFetched(userId: string): void {
+  workoutHistoryFetchedAtByUser.set(userId, Date.now());
+}
+
+function shouldSkipWorkoutHistoryFetch(userId: string, force?: boolean): boolean {
+  if (force) return false;
+  const lastFetchedAt = workoutHistoryFetchedAtByUser.get(userId);
+  return !isStaleTimestamp(lastFetchedAt, DEFAULT_FRESHNESS_WINDOW_MS);
+}
+
+const MIN_REST_SECONDS = 1;
+const MAX_REST_SECONDS = 1800;
+
+function sanitizeRestSeconds(seconds: number): number {
+  const parsed = Number.isFinite(seconds) ? Math.floor(seconds) : initialSettings.defaultRestSeconds;
+  return Math.max(MIN_REST_SECONDS, Math.min(MAX_REST_SECONDS, parsed));
+}
+
+function getUniqueExerciseIds(exerciseIds: string[]): string[] {
+  return Array.from(new Set(exerciseIds.map((id) => String(id || '').trim()).filter(Boolean)));
+}
+
+function propagateRestSecondsAcrossPlans(
+  workoutPlans: WorkoutPlan[],
+  exerciseIds: string[],
+  restSeconds: number
+): { nextPlans: WorkoutPlan[]; affectedPlanIds: string[] } {
+  const uniqueExerciseIds = new Set(getUniqueExerciseIds(exerciseIds));
+  if (uniqueExerciseIds.size === 0) {
+    return { nextPlans: workoutPlans, affectedPlanIds: [] };
+  }
+
+  const updatedAt = new Date();
+  const affectedPlanIds: string[] = [];
+
+  const nextPlans = workoutPlans.map((plan) => {
+    let planChanged = false;
+
+    const nextWorkoutDays = plan.workoutDays.map((day) => {
+      let dayChanged = false;
+
+      const nextExercises = day.exercises.map((exercise) => {
+        if (!uniqueExerciseIds.has(exercise.exerciseId)) {
+          return exercise;
+        }
+
+        if (exercise.restSeconds === restSeconds) {
+          return exercise;
+        }
+
+        dayChanged = true;
+        planChanged = true;
+        return {
+          ...exercise,
+          restSeconds,
+        };
+      });
+
+      if (!dayChanged) {
+        return day;
+      }
+
+      return {
+        ...day,
+        exercises: nextExercises,
+        updatedAt,
+      };
+    });
+
+    if (!planChanged) {
+      return plan;
+    }
+
+    affectedPlanIds.push(plan.id);
+    return {
+      ...plan,
+      workoutDays: nextWorkoutDays,
+      updatedAt,
+    };
+  });
+
+  return {
+    nextPlans,
+    affectedPlanIds,
+  };
+}
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -466,36 +567,59 @@ export const useAppStore = create<AppState>()(
           },
         })),
       startRestTimer: (seconds) =>
-        set((state) => ({
-          activeWorkout: {
-            ...state.activeWorkout,
-            restTimer: {
-              isRunning: true,
-              targetSeconds: seconds,
-              elapsedSeconds: 0,
+        set((state) => {
+          if (state.activeWorkout.restTimer.isRunning) {
+            return state;
+          }
+
+          return {
+            activeWorkout: {
+              ...state.activeWorkout,
+              restTimer: {
+                isRunning: true,
+                targetSeconds: Math.max(1, Math.floor(seconds)),
+                elapsedSeconds: 0,
+              },
             },
-          },
-        })),
+          };
+        }),
       updateRestTimer: (elapsed) =>
-        set((state) => ({
-          activeWorkout: {
-            ...state.activeWorkout,
-            restTimer: {
-              ...state.activeWorkout.restTimer,
-              elapsedSeconds: elapsed,
+        set((state) => {
+          if (!state.activeWorkout.restTimer.isRunning) {
+            return state;
+          }
+
+          const nextElapsed = Math.max(0, Math.floor(elapsed));
+          if (state.activeWorkout.restTimer.elapsedSeconds === nextElapsed) {
+            return state;
+          }
+
+          return {
+            activeWorkout: {
+              ...state.activeWorkout,
+              restTimer: {
+                ...state.activeWorkout.restTimer,
+                elapsedSeconds: nextElapsed,
+              },
             },
-          },
-        })),
+          };
+        }),
       stopRestTimer: () =>
-        set((state) => ({
-          activeWorkout: {
-            ...state.activeWorkout,
-            restTimer: {
-              ...state.activeWorkout.restTimer,
-              isRunning: false,
+        set((state) => {
+          if (!state.activeWorkout.restTimer.isRunning) {
+            return state;
+          }
+
+          return {
+            activeWorkout: {
+              ...state.activeWorkout,
+              restTimer: {
+                ...state.activeWorkout.restTimer,
+                isRunning: false,
+              },
             },
-          },
-        })),
+          };
+        }),
 
       setMeasurementLogs: (logs) => set({ measurementLogs: logs }),
       // Progress Actions
@@ -518,6 +642,13 @@ export const useAppStore = create<AppState>()(
       updateSettings: (updates) =>
         set((state) => ({
           settings: { ...state.settings, ...updates },
+        })),
+      setDefaultRestSeconds: (seconds) =>
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            defaultRestSeconds: sanitizeRestSeconds(seconds),
+          },
         })),
       addBlacklistedExercise: (exerciseId) =>
         set((state) => ({
@@ -606,6 +737,52 @@ export const useAppStore = create<AppState>()(
           return await dataService.workout.updateWorkoutPlan(id, updates);
         }, undefined, isGuest);
         return result || { ...originalPlan!, ...updates };
+      },
+
+      syncUpdateExerciseRestSecondsGlobally: async (exerciseId, restSeconds) => {
+        const exerciseIds = getUniqueExerciseIds([exerciseId]);
+        if (exerciseIds.length === 0) return;
+        await get().syncUpdateExercisesRestSecondsGlobally(exerciseIds, restSeconds);
+      },
+
+      syncUpdateExercisesRestSecondsGlobally: async (exerciseIds, restSeconds) => {
+        const normalizedRestSeconds = sanitizeRestSeconds(restSeconds);
+        const uniqueExerciseIds = getUniqueExerciseIds(exerciseIds);
+        if (uniqueExerciseIds.length === 0) return;
+
+        const currentPlans = get().workoutPlans;
+        const { nextPlans, affectedPlanIds } = propagateRestSecondsAcrossPlans(
+          currentPlans,
+          uniqueExerciseIds,
+          normalizedRestSeconds
+        );
+
+        if (affectedPlanIds.length === 0) {
+          return;
+        }
+
+        set({ workoutPlans: nextPlans });
+
+        const isGuest = get().isGuest;
+        const syncResult = await trySyncToCloud(async () => {
+          const latestPlans = get().workoutPlans;
+
+          await Promise.all(affectedPlanIds.map(async (planId) => {
+            const plan = latestPlans.find((candidate) => candidate.id === planId);
+            if (!plan) return;
+
+            await dataService.workout.updateWorkoutPlan(planId, {
+              workoutDays: plan.workoutDays,
+              updatedAt: plan.updatedAt,
+            });
+          }));
+
+          return true;
+        }, undefined, isGuest);
+
+        if (!isGuest && syncResult === null) {
+          throw new Error('Failed to sync rest timer changes to cloud.');
+        }
       },
 
       syncDeleteWorkoutPlanFromCloud: async (id) => {
@@ -744,10 +921,15 @@ export const useAppStore = create<AppState>()(
         // For authenticated users, sync to cloud
         await trySyncToCloud(async () => {
           // Destructure to remove 'id' and 'createdAt' which the service generates/omits
+          // But keep userId and date which are required by the service
           const { id, createdAt, ...logData } = log;
           
-          // Pass the CamelCase object to the service. 
-          return await dataService.progress.addMeasurementLog(logData);
+          // Pass the full object with userId and date included
+          return await dataService.progress.addMeasurementLog({
+            ...logData,
+            userId: log.userId,
+            date: log.date,
+          });
         }, undefined, isGuest);
       },
 
@@ -820,12 +1002,22 @@ export const useAppStore = create<AppState>()(
           return undefined;
         }
 
+        const normalizedStartTime =
+          activeWorkout.startTime instanceof Date
+            ? activeWorkout.startTime
+            : new Date(activeWorkout.startTime);
+
+        if (Number.isNaN(normalizedStartTime.getTime())) {
+          if (__DEV__) console.error('❌ Cannot save session: invalid start time', activeWorkout.startTime);
+          return undefined;
+        }
+
         const sessionInput = {
           userId: user.id,
           planId: activeWorkout.workoutId || undefined,
           workoutDayId: undefined,
           name: sessionData.name,
-          startedAt: activeWorkout.startTime!,
+          startedAt: normalizedStartTime,
           endedAt: new Date(),
           warmupMode: activeWorkout.warmupMode,
           deloadMode: activeWorkout.deloadMode,
@@ -839,6 +1031,7 @@ export const useAppStore = create<AppState>()(
         
         if (result) {
           set((state) => ({ workoutHistory: [result, ...state.workoutHistory] }));
+          invalidateWorkoutHistoryCache(user.id);
           return result.id;
         }
         
@@ -872,6 +1065,7 @@ export const useAppStore = create<AppState>()(
         };
         
         set((state) => ({ workoutHistory: [localSession, ...state.workoutHistory] }));
+        invalidateWorkoutHistoryCache(user.id);
         return localSessionId;
       },
 
@@ -914,11 +1108,12 @@ export const useAppStore = create<AppState>()(
         }, undefined, isGuest);
       },
 
-      syncFetchWorkoutHistory: async () => {
+      syncFetchWorkoutHistory: async (options) => {
         const state = get();
         const user = state.user;
         if (!user?.id) return;
         if (user.id.startsWith('guest-')) return;
+        if (shouldSkipWorkoutHistoryFetch(user.id, options?.force)) return;
 
         const isGuest = state.isGuest;
         await trySyncToCloud(async () => {
@@ -929,6 +1124,7 @@ export const useAppStore = create<AppState>()(
             limit: 100,
           });
           set({ workoutHistory: history });
+          markWorkoutHistoryFetched(user.id);
         }, undefined, isGuest);
       },
 
@@ -963,34 +1159,63 @@ export const useAppStore = create<AppState>()(
           });
         }
 
+        // Sync workout plans and capture returned cloud UUIDs
+        const syncedPlans: WorkoutPlan[] = [];
         for (const plan of state.workoutPlans) {
           const { id: localId, ...planData } = plan;
-          const cloudPlan = { ...planData, userId: authenticatedUser.id };
-          await trySyncToCloud(async () => {
-            await dataService.workout.createWorkoutPlan(cloudPlan as any);
+          const cloudPlanInput = { ...planData, userId: authenticatedUser.id };
+          const cloudPlan = await trySyncToCloud(async () => {
+            return await dataService.workout.createWorkoutPlan(cloudPlanInput as any);
           });
+          if (cloudPlan) {
+            syncedPlans.push(cloudPlan);
+          } else {
+            // Fallback: keep local plan but update userId
+            syncedPlans.push({ ...plan, userId: authenticatedUser.id });
+          }
         }
+        // Update store with cloud UUIDs immediately
+        set({ workoutPlans: syncedPlans });
 
-        // ✅ Updated: Sync Measurement Logs instead of old measurementLogs
+        // ✅ Updated: Sync Measurement Logs and capture returned cloud UUIDs
+        const syncedMeasurementLogs: MeasurementLog[] = [];
         for (const log of state.measurementLogs) {
-          const { id: localId, ...data } = log;
-          const cloudLog = { 
+          const { id: localId, createdAt, ...data } = log;
+          const cloudLogInput = { 
             ...data, 
             userId: authenticatedUser.id,
-            user_id: authenticatedUser.id, // For raw insert
+            date: log.date, // Ensure date is included
           };
-          await trySyncToCloud(async () => {
-            await dataService.progress.addMeasurementLog(cloudLog as any);
+          const cloudLog = await trySyncToCloud(async () => {
+            return await dataService.progress.addMeasurementLog(cloudLogInput);
           });
+          if (cloudLog) {
+            syncedMeasurementLogs.push(cloudLog);
+          } else {
+            // Fallback: keep local log but update userId
+            syncedMeasurementLogs.push({ ...log, userId: authenticatedUser.id });
+          }
         }
+        // Update store with cloud UUIDs immediately
+        set({ measurementLogs: syncedMeasurementLogs });
 
+        // Sync physique scans and capture returned cloud UUIDs
+        const syncedScans: PhysiqueScan[] = [];
         for (const scan of state.physiqueScans) {
           const { id: localId, ...scanData } = scan;
-          const cloudScan = { ...scanData, userId: authenticatedUser.id };
-          await trySyncToCloud(async () => {
-            await dataService.progress.addPhysiqueScan(cloudScan as any);
+          const cloudScanInput = { ...scanData, userId: authenticatedUser.id };
+          const cloudScan = await trySyncToCloud(async () => {
+            return await dataService.progress.addPhysiqueScan(cloudScanInput as any);
           });
+          if (cloudScan) {
+            syncedScans.push(cloudScan);
+          } else {
+            // Fallback: keep local scan but update userId
+            syncedScans.push({ ...scan, userId: authenticatedUser.id });
+          }
         }
+        // Update store with cloud UUIDs immediately
+        set({ physiqueScans: syncedScans });
 
         set({
           user: updatedUser,
@@ -1003,8 +1228,8 @@ export const useAppStore = create<AppState>()(
           activeWorkout: {
             ...state.activeWorkout,
             ...updates,
-            exerciseSets: updates.exerciseSets 
-              ? { ...state.activeWorkout.exerciseSets, ...updates.exerciseSets }
+            exerciseSets: updates.exerciseSets !== undefined
+              ? updates.exerciseSets
               : state.activeWorkout.exerciseSets
           },
         })),
@@ -1018,7 +1243,14 @@ export const useAppStore = create<AppState>()(
         equipment: state.equipment,
         isGuest: state.isGuest,
         workoutPlans: state.workoutPlans,
-        activeWorkout: state.activeWorkout,
+        activeWorkout: {
+          ...state.activeWorkout,
+          restTimer: {
+            isRunning: false,
+            targetSeconds: state.activeWorkout.restTimer.targetSeconds,
+            elapsedSeconds: 0,
+          },
+        },
         workoutHistory: state.workoutHistory,
         measurementLogs: state.measurementLogs, // ✅ Renamed
         physiqueScans: state.physiqueScans,

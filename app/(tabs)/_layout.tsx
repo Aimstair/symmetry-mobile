@@ -1,5 +1,5 @@
 import { Tabs } from 'expo-router';
-import { View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Home, Dumbbell, TrendingUp, Settings, Scan } from 'lucide-react-native';
 
 /**
@@ -13,7 +13,7 @@ import { Home, Dumbbell, TrendingUp, Settings, Scan } from 'lucide-react-native'
  */
 
 export default function TabLayout() {
-  const iconSize = 24;
+  const insets = useSafeAreaInsets();
   const activeColor = 'hsl(187, 85%, 53%)'; // Primary cyan
   const inactiveColor = 'hsl(240, 5%, 55%)'; // Muted
 
@@ -21,12 +21,16 @@ export default function TabLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
+        // Performance: keep tab scenes attached for smoother switching.
+        // Heavy screens (charts/lists) can stutter when freeze/detach toggles every switch.
+        lazy: true,
+        freezeOnBlur: false,
         tabBarStyle: {
           backgroundColor: 'hsl(240, 10%, 6%)',
           borderTopColor: 'rgb(121, 68, 103)',
           borderTopWidth: 0.2,
-          height: 60,
-          paddingBottom: 8,
+          height: 60 + insets.bottom,
+          paddingBottom: Math.max(8, insets.bottom),
           paddingTop: 8,
         },
         tabBarActiveTintColor: activeColor,

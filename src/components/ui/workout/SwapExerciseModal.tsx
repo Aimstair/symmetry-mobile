@@ -26,6 +26,7 @@ export function SwapExerciseModal({
   const [alternatives, setAlternatives] = useState<CatalogExercise[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedAlt, setSelectedAlt] = useState<CatalogExercise | null>(null);
+  const canConfirmSwap = !!selectedAlt && !isLoading;
 
   // Fetch alternatives when modal opens
   useEffect(() => {
@@ -131,9 +132,9 @@ export function SwapExerciseModal({
           </View>
           <View className="flex-1">
             <Button 
-              className="bg-primary" 
+              className={cn('bg-primary', canConfirmSwap ? 'opacity-100' : 'opacity-50')} 
               onPress={handleConfirmSwap}
-              disabled={!selectedAlt}
+              disabled={!canConfirmSwap}
             >
               <Text className="text-primary-foreground font-semibold">Swap</Text>
             </Button>

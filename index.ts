@@ -1,16 +1,6 @@
 import { registerRootComponent } from 'expo';
-import {
-  configureReanimatedLogger,
-  ReanimatedLogLevel,
-} from 'react-native-reanimated';
 
 import App from './App';
-
-// Disable Reanimated strict mode warnings
-configureReanimatedLogger({
-  level: ReanimatedLogLevel.error,
-  strict: false,
-});
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,

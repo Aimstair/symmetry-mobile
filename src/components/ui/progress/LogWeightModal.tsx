@@ -20,6 +20,16 @@ export function LogWeightModal({ open, onOpenChange, onSave, currentUnit }: LogW
 
   const user = useAppStore((s) => s.user);
   const settings = useAppStore((s) => s.settings);
+  const unit = currentUnit || settings.unit;
+
+  const placeholderWeight = (() => {
+    if (typeof user?.weight === 'number' && user.weight > 0) {
+      const displayWeight = unit === 'lbs' ? user.weight * 2.20462 : user.weight;
+      return displayWeight.toFixed(1);
+    }
+
+    return unit === 'kg' ? '80.0' : '180.0';
+  })();
 
   const isValidInput = (val: string) => {
     if (!val || val.trim() === '') return false;
@@ -64,9 +74,9 @@ export function LogWeightModal({ open, onOpenChange, onSave, currentUnit }: LogW
 
         <View className="gap-4">
           <View>
-            <Label className="mb-1">Weight ({settings.unit})</Label>
+            <Label className="mb-1">Weight ({unit})</Label>
             <Input
-              placeholder={user?.weight?.toString() || "180.0"}
+              placeholder={placeholderWeight}
               value={weight}
               onChangeText={setWeight}
               keyboardType="decimal-pad"

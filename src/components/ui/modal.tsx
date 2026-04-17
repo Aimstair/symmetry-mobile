@@ -12,6 +12,9 @@ interface ModalProps {
 
 export function Modal({ open, onOpenChange, children }: ModalProps) {
   if (!open) return null;
+
+  const keyboardBehavior: 'padding' | 'height' | undefined =
+    Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined;
   
   return (
     <RNModal
@@ -32,8 +35,9 @@ export function Modal({ open, onOpenChange, children }: ModalProps) {
         {/* Content Container - sits above backdrop */}
         <View style={styles.contentPosition}>
           <KeyboardAvoidingView 
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            enabled={Platform.OS === 'ios'}
+            behavior={keyboardBehavior}
+            enabled
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 24 : 0}
             style={styles.keyboardView}
           >
             <View style={styles.contentWrapper}>
@@ -41,8 +45,9 @@ export function Modal({ open, onOpenChange, children }: ModalProps) {
                 contentContainerStyle={styles.scrollContent}
                 showsVerticalScrollIndicator={false}
                 bounces={false}
-                keyboardShouldPersistTaps="handled"
+                keyboardShouldPersistTaps="always"
                 nestedScrollEnabled={true}
+                keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
               >
                 {children}
               </ScrollView>
@@ -75,6 +80,7 @@ const styles = StyleSheet.create({
   },
   keyboardView: {
     width: '100%',
+    maxHeight: '90%',
   },
   contentWrapper: {
     width: '100%',
@@ -86,6 +92,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 24,
+    paddingBottom: 32,
   },
 });
 

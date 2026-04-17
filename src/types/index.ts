@@ -360,9 +360,12 @@ export interface CardioLog {
 // ============================================================================
 
 export interface AppSettings {
+  workoutReminderHour: number;
+  workoutReminderMinute: number;
   theme: 'light' | 'dark' | 'auto';
   unit: 'lbs' | 'kg';
   measurementUnit: 'in' | 'cm';
+  defaultRestSeconds: number;
   notifications: {
     workoutReminders: boolean;
     restTimerSound: boolean;

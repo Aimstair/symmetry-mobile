@@ -28,6 +28,7 @@ export function ActiveDayModal({ open, onOpenChange, dayName, onConfirm }: Activ
   const [workoutName, setWorkoutName] = useState(`${dayName} Workout`);
   const [selectedMuscles, setSelectedMuscles] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const canCreateWorkout = workoutName.trim().length > 0 && selectedMuscles.length > 0 && !isSubmitting;
 
   // Reset form when modal opens with new dayName
   React.useEffect(() => {
@@ -129,9 +130,9 @@ export function ActiveDayModal({ open, onOpenChange, dayName, onConfirm }: Activ
           </View>
           <View className="flex-1">
             <Button 
-              className="bg-primary" 
+              className={cn('bg-primary', canCreateWorkout ? 'opacity-100' : 'opacity-50')} 
               onPress={handleConfirm}
-              disabled={isSubmitting || !workoutName.trim() || selectedMuscles.length === 0}
+              disabled={!canCreateWorkout}
             >
               <Text className="text-primary-foreground font-semibold">
                 {isSubmitting ? 'Creating...' : 'Create'}

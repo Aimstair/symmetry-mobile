@@ -1,35 +1,47 @@
 import { MMKV } from 'react-native-mmkv';
 import { StateStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
- * Storage Wrapper - MMKV Implementation
- * 
- * MMKV is synchronous and blazing fast, eliminating race conditions.
- * We keep the async interface for compatibility with existing code.
+ * Storage Wrapper - MMKV with AsyncStorage Fallback
+ * * MMKV is synchronous and fast. We wrap it to handle environments 
+ * where JSI is unavailable (e.g., Remote Debugging).
  */
 
-// Initialize MMKV instance
-const mmkv = new MMKV({ id: 'symmetry-storage' });
+// 1. Initialize MMKV safely. If it fails, we catch the error and use AsyncStorage.
+let mmkv: MMKV | null = null;
+try {
+  mmkv = new MMKV({ id: 'symmetry-storage' });
+} catch (e) {
+  console.warn("MMKV failed to initialize (likely due to Remote Debugging). Falling back to AsyncStorage.");
+}
 
 /**
  * Storage adapter for Zustand persist middleware
- * Uses MMKV under the hood but maintains async interface for compatibility
  */
 export const storageAdapter: StateStorage = {
-  getItem: (key: string): string | null => {
-    return mmkv.getString(key) ?? null;
+  getItem: async (key: string): Promise<string | null> => {
+    if (mmkv) return mmkv.getString(key) ?? null;
+    return await AsyncStorage.getItem(key);
   },
-  setItem: (key: string, value: string): void => {
-    mmkv.set(key, value);
+  setItem: async (key: string, value: string): Promise<void> => {
+    if (mmkv) {
+      mmkv.set(key, value);
+      return;
+    }
+    await AsyncStorage.setItem(key, value);
   },
-  removeItem: (key: string): void => {
-    mmkv.delete(key);
+  removeItem: async (key: string): Promise<void> => {
+    if (mmkv) {
+      mmkv.delete(key);
+      return;
+    }
+    await AsyncStorage.removeItem(key);
   },
 };
 
 /**
  * Helper functions for typed storage
- * NOTE: These remain async-returning for interface compatibility with LocalService
  */
 export const StorageKeys = {
   USER: 'user',
@@ -39,9 +51,23 @@ export const StorageKeys = {
 } as const;
 
 export async function getStorageItem<T>(key: string): Promise<T | null> {
-  const item = mmkv.getString(key);
-  if (!item) return null;
+  // Try MMKV first
+  if (mmkv) {
+    const item = mmkv.getString(key);
+    if (item) {
+      try {
+        return JSON.parse(item) as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  
+  // Fallback to Async Storage
   try {
+    const item = await AsyncStorage.getItem(key);
+    if (!item) return null;
     return JSON.parse(item) as T;
   } catch {
     return null;
@@ -49,13 +75,26 @@ export async function getStorageItem<T>(key: string): Promise<T | null> {
 }
 
 export async function setStorageItem<T>(key: string, value: T): Promise<void> {
-  mmkv.set(key, JSON.stringify(value));
+  const stringValue = JSON.stringify(value);
+  if (mmkv) {
+    mmkv.set(key, stringValue);
+    return;
+  }
+  await AsyncStorage.setItem(key, stringValue);
 }
 
 export async function removeStorageItem(key: string): Promise<void> {
-  mmkv.delete(key);
+  if (mmkv) {
+    mmkv.delete(key);
+    return;
+  }
+  await AsyncStorage.removeItem(key);
 }
 
 export async function clearStorage(): Promise<void> {
-  mmkv.clearAll();
+  if (mmkv) {
+    mmkv.clearAll();
+    return;
+  }
+  await AsyncStorage.clear();
 }

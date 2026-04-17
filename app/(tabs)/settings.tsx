@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+﻿import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Pressable, Animated, Alert, Linking, Platform, TextInput, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, ScrollView, Pressable, Animated,  Linking, Platform, TextInput, ActivityIndicator } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as StoreReview from 'expo-store-review';
 import * as Device from 'expo-device';
@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { useAppStore } from '@/store/useAppStore';
+import { useConsumeSessionAnimation } from '@/hooks/useSessionAnimationGate';
 import { supabase } from '@/lib/supabase';
 import { notificationService } from '@/services/NotificationService';
 import { calculateNutritionTargets } from '@/utils/nutrition';
@@ -25,6 +26,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/modal';
+import { showAppAlert } from '@/store/useAlertStore';
 import {
   Select,
   SelectContent,
@@ -59,11 +61,12 @@ import {
   MessageSquare,
   Send
 } from 'lucide-react-native';
-import { cn, convert } from '@/lib/utils';
+import { cn, convert, formatExerciseDisplayName } from '@/lib/utils';
 import type { User as UserType } from '@/types';
 
 export default function Settings() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const headerAnim = useRef(new Animated.Value(0)).current;
   const section1Anim = useRef(new Animated.Value(0)).current;
   const section2Anim = useRef(new Animated.Value(0)).current;
@@ -72,12 +75,15 @@ export default function Settings() {
   const section5Anim = useRef(new Animated.Value(0)).current;
   const section6Anim = useRef(new Animated.Value(0)).current;
   const section7Anim = useRef(new Animated.Value(0)).current;
+  const animationInFlightRef = useRef<Animated.CompositeAnimation | null>(null);
+  const consumeEntryAnimation = useConsumeSessionAnimation('tabs-settings');
 
   // Get store data and actions
   const user = useAppStore((s) => s.user);
   const isGuest = useAppStore((s) => s.isGuest);
+  const isPro = useAppStore((s) => s.isPro);
   
-  // ✅ FIX: Derive the real guest state. 
+  // âœ… FIX: Derive the real guest state. 
   // If we have an email, we are NOT a guest, even if the store flag is stuck.
   const isGuestAccount = isGuest && (!user?.email || user.email === '');
 
@@ -129,6 +135,31 @@ export default function Settings() {
 
   useFocusEffect(
     useCallback(() => {
+      const shouldAnimateEntry = consumeEntryAnimation();
+
+      if (!shouldAnimateEntry) {
+        if (animationInFlightRef.current) {
+          animationInFlightRef.current.stop();
+          animationInFlightRef.current = null;
+        }
+
+        headerAnim.setValue(1);
+        section1Anim.setValue(1);
+        section2Anim.setValue(1);
+        section3Anim.setValue(1);
+        section4Anim.setValue(1);
+        section5Anim.setValue(1);
+        section6Anim.setValue(1);
+        section7Anim.setValue(1);
+
+        return () => {
+          if (animationInFlightRef.current) {
+            animationInFlightRef.current.stop();
+            animationInFlightRef.current = null;
+          }
+        };
+      }
+
       headerAnim.setValue(0);
       section1Anim.setValue(0);
       section2Anim.setValue(0);
@@ -148,14 +179,19 @@ export default function Settings() {
         Animated.timing(section6Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(section7Anim, { toValue: 1, duration: 400, useNativeDriver: true }),
       ]);
+
+      animationInFlightRef.current = animation;
       
       animation.start();
 
       // CLEANUP: Stop animation if user navigates away before it finishes
       return () => {
         animation.stop();
+        if (animationInFlightRef.current === animation) {
+          animationInFlightRef.current = null;
+        }
       };
-    }, [])
+    }, [consumeEntryAnimation])
   );
 
   const createAnimStyle = (anim: Animated.Value) => ({
@@ -220,13 +256,13 @@ export default function Settings() {
 
     } catch (error) {
       console.error('Failed to update profile:', error);
-      Alert.alert('Error', 'Failed to update profile. Please try again.');
+      showAppAlert('Error', 'Failed to update profile. Please try again.');
     }
   };
 
   // Handle sign out
   const handleSignOut = async () => {
-    Alert.alert(
+    showAppAlert(
       'Sign Out',
       'Are you sure you want to sign out?',
       [
@@ -275,7 +311,35 @@ export default function Settings() {
   const restTimerSound = settings.notifications.restTimerSound;
   const progressUpdates = settings.notifications.progressUpdates;
 
+  const subscriptionFeatures = [
+    { label: 'AI Analysis & Insights', included: isPro },
+    {
+      label: isPro ? 'Physique Scans (Weekly)' : 'Physique Scans (Monthly)',
+      included: true,
+    },
+    { label: 'Advanced Metrics (RPE)', included: isPro },
+    { label: 'Priority Support', included: isPro },
+  ];
+
   const handleNotificationChange = async (key: 'workoutReminders' | 'restTimerSound' | 'progressUpdates', value: boolean) => {
+    if (value && (key === 'workoutReminders' || key === 'progressUpdates')) {
+      const granted = await notificationService.ensurePermissions();
+      if (!granted) {
+        showAppAlert(
+          'Notifications Disabled',
+          'Symmetry needs notification permission to enable this setting. You can allow notifications in system settings.'
+        );
+
+        updateSettings({
+          notifications: {
+            ...settings.notifications,
+            [key]: false,
+          },
+        });
+        return;
+      }
+    }
+
     updateSettings({
       notifications: {
         ...settings.notifications,
@@ -283,15 +347,20 @@ export default function Settings() {
       },
     });
 
-    // Handle workout reminder scheduling
-    if (key === 'workoutReminders') {
-      if (value) {
-        // Schedule the reminder
-        await notificationService.scheduleWorkoutReminder(reminderHour, reminderMinute);
-      } else {
-        // Cancel all workout reminders
-        await notificationService.cancelWorkoutReminders();
+    try {
+      // Handle workout reminder scheduling
+      if (key === 'workoutReminders') {
+        if (value) {
+          // Schedule the reminder
+          await notificationService.scheduleWorkoutReminder(reminderHour, reminderMinute);
+        } else {
+          // Cancel all workout reminders
+          await notificationService.cancelWorkoutReminders();
+        }
       }
+    } catch (error) {
+      console.error('Failed to update notification setting:', error);
+      showAppAlert('Error', 'Could not update notifications right now. Please try again.');
     }
   };
 
@@ -308,7 +377,12 @@ export default function Settings() {
 
     // Reschedule if reminders are enabled
     if (workoutReminders) {
-      await notificationService.scheduleWorkoutReminder(hour, minute);
+      try {
+        await notificationService.scheduleWorkoutReminder(hour, minute);
+      } catch (error) {
+        console.error('Failed to reschedule reminder:', error);
+        showAppAlert('Reminder Not Updated', 'Unable to update reminder time right now.');
+      }
     }
   };
 
@@ -319,7 +393,7 @@ export default function Settings() {
       await exportUserData();
     } catch (error) {
       console.error('Failed to export data:', error);
-      Alert.alert(
+      showAppAlert(
         'Export Failed',
         error instanceof Error ? error.message : 'Unable to export your data. Please try again.'
       );
@@ -354,7 +428,7 @@ export default function Settings() {
       
       if (error) {
         console.error('Failed to delete account:', error);
-        Alert.alert('Error', 'Failed to delete account. Please try again or contact support.');
+        showAppAlert('Error', 'Failed to delete account. Please try again or contact support.');
         return;
       }
 
@@ -365,14 +439,14 @@ export default function Settings() {
       await supabase.auth.signOut();
       resetStore();
       
-      Alert.alert(
+      showAppAlert(
         'Account Deleted',
         'Your account and all associated data have been permanently deleted.',
         [{ text: 'OK', onPress: () => router.replace('/onboarding') }]
       );
     } catch (error) {
       console.error('Error deleting account:', error);
-      Alert.alert('Error', 'Something went wrong. Please try again.');
+      showAppAlert('Error', 'Something went wrong. Please try again.');
     } finally {
       setIsDeletingAccount(false);
       setShowDeleteConfirm(false);
@@ -383,7 +457,7 @@ export default function Settings() {
   // Handle feedback submission
   const handleSubmitFeedback = async () => {
     if (!feedbackMessage.trim()) {
-      Alert.alert('Error', 'Please enter your feedback message.');
+      showAppAlert('Error', 'Please enter your feedback message.');
       return;
     }
 
@@ -398,8 +472,8 @@ export default function Settings() {
         appVersion: Application.nativeApplicationVersion || undefined,
       });
 
-      Alert.alert(
-        'Thank You! 🙏',
+      showAppAlert(
+        'Thank You!',
         'Your feedback has been submitted. We appreciate you helping us improve Symmetry!',
         [{ text: 'OK', onPress: () => setShowFeedbackModal(false) }]
       );
@@ -407,7 +481,7 @@ export default function Settings() {
       setFeedbackCategory('general');
     } catch (error) {
       console.error('Failed to submit feedback:', error);
-      Alert.alert('Error', 'Failed to submit feedback. Please try again later.');
+      showAppAlert('Error', 'Failed to submit feedback. Please try again later.');
     } finally {
       setIsSubmittingFeedback(false);
     }
@@ -415,11 +489,11 @@ export default function Settings() {
 
   // Legal links
   const openPrivacyPolicy = () => {
-    Linking.openURL('https://symmetry.app/privacy');
+    Linking.openURL('https://symmetryai.app/privacy');
   };
 
   const openTermsOfService = () => {
-    Linking.openURL('https://symmetry.app/terms');
+    Linking.openURL('https://symmetryai.app/terms');
   };
 
   // Blacklist from store
@@ -461,13 +535,18 @@ export default function Settings() {
 
   const calculateMacros = () => {
     const { age, gender, weight, height, activity, goal } = macroForm;
+    const weightValue = Number(weight);
+    const heightValue = Number(height);
+
+    const weightKg = settings.unit === 'kg' ? weightValue : weightValue * 0.453592;
+    const heightCm = settings.measurementUnit === 'cm' ? heightValue : heightValue * 2.54;
     
     // Mifflin-St Jeor formula
     let bmr: number;
     if (gender === 'male') {
-      bmr = 10 * Number(weight) * 0.453592 + 6.25 * Number(height) * 2.54 - 5 * Number(age) + 5;
+      bmr = 10 * weightKg + 6.25 * heightCm - 5 * Number(age) + 5;
     } else {
-      bmr = 10 * Number(weight) * 0.453592 + 6.25 * Number(height) * 2.54 - 5 * Number(age) - 161;
+      bmr = 10 * weightKg + 6.25 * heightCm - 5 * Number(age) - 161;
     }
 
     const activityMultipliers: Record<string, number> = {
@@ -487,7 +566,7 @@ export default function Settings() {
       default: calories = tdee;
     }
 
-    const protein = Number(weight) * 1; // 1g per lb
+    const protein = weightKg * 2.20462; // 1g per lb equivalent
     const fats = (calories * 0.25) / 9;
     const carbs = (calories - protein * 4 - fats * 9) / 4;
 
@@ -514,7 +593,7 @@ export default function Settings() {
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
       <ScrollView className="flex-1">
-        <View className="px-4 py-6 pb-24">
+        <View className="px-4">
           <Animated.View style={createAnimStyle(headerAnim)} className="mb-6">
             <Text className="text-2xl font-bold text-foreground">Settings</Text>
             <Text className="text-muted-foreground text-sm mt-1">
@@ -815,30 +894,48 @@ export default function Settings() {
                   <Crown size={20} color="#FFFFFF" />
                 </View>
                 <View>
-                  <Text className="font-bold text-foreground">Free Plan</Text>
-                  <Text className="text-xs text-muted-foreground">Basic features</Text>
+                  <Text className="font-bold text-foreground">{isPro ? 'Pro Plan' : 'Free Plan'}</Text>
+                  <Text className="text-xs text-muted-foreground">
+                    {isPro ? 'Premium features unlocked' : 'Core training features'}
+                  </Text>
                 </View>
               </View>
               <View className="flex-row flex-wrap gap-2 mb-4">
-                <View className="w-[48%] flex-row items-center gap-2">
-                  <Sparkles size={16} color="#31D5E3" />
-                  <Text className="text-sm text-foreground">AI Analysis</Text>
-                </View>
-                <View className="w-[48%] flex-row items-center gap-2">
-                  <X size={16} color="#71717A" />
-                  <Text className="text-sm text-muted-foreground">Unlimited Scans</Text>
-                </View>
-                <View className="w-[48%] flex-row items-center gap-2">
-                  <Sparkles size={16} color="#31D5E3" />
-                  <Text className="text-sm text-foreground">Workout Tracking</Text>
-                </View>
-                <View className="w-[48%] flex-row items-center gap-2">
-                  <X size={16} color="#71717A" />
-                  <Text className="text-sm text-muted-foreground">Custom Plans</Text>
-                </View>
+                {subscriptionFeatures.map((feature) => (
+                  <View key={feature.label} className="w-[48%] flex-row items-center gap-2">
+                    {feature.included ? (
+                      <Sparkles size={16} color="#31D5E3" />
+                    ) : (
+                      <X size={16} color="#71717A" />
+                    )}
+                    <Text
+                      className={cn(
+                        'text-sm',
+                        feature.included ? 'text-foreground' : 'text-muted-foreground'
+                      )}
+                    >
+                      {feature.label}
+                    </Text>
+                  </View>
+                ))}
               </View>
-              <Button className="w-full bg-primary">
-                <Text className="text-primary-foreground font-semibold">Upgrade to Pro</Text>
+              <Button
+                className={cn('w-full', isPro ? 'bg-card border border-border' : 'bg-primary')}
+                onPress={() => {
+                  if (!isPro && progressUpdates) {
+                    void notificationService.maybeScheduleProUpsellNotification('settings');
+                  }
+                  router.push(isPro ? '/pro-benefits' : '/paywall');
+                }}
+              >
+                <Text
+                  className={cn(
+                    'font-semibold',
+                    isPro ? 'text-foreground' : 'text-primary-foreground'
+                  )}
+                >
+                  {isPro ? 'Manage Pro Plan' : 'Upgrade to Pro'}
+                </Text>
               </Button>
             </GlassCard>
           </Animated.View>
@@ -1139,21 +1236,21 @@ export default function Settings() {
 
             <View className="flex-row gap-4">
               <View className="flex-1">
-                <Label>Weight (lbs)</Label>
+                <Label>Weight ({settings.unit})</Label>
                 <Input 
                   value={macroForm.weight}
                   onChangeText={(text) => setMacroForm({ ...macroForm, weight: text })}
-                  placeholder="180"
+                  placeholder={settings.unit === 'kg' ? '80' : '180'}
                   keyboardType="numeric"
                   className="mt-1"
                 />
               </View>
               <View className="flex-1">
-                <Label>Height (in)</Label>
+                <Label>Height ({settings.measurementUnit})</Label>
                 <Input 
                   value={macroForm.height}
                   onChangeText={(text) => setMacroForm({ ...macroForm, height: text })}
-                  placeholder="70"
+                  placeholder={settings.measurementUnit === 'cm' ? '178' : '70'}
                   keyboardType="numeric"
                   className="mt-1"
                 />
@@ -1254,7 +1351,7 @@ export default function Settings() {
           
           <View className="gap-4 py-4">
             <View>
-              <Label>Bar Weight (lbs)</Label>
+              <Label>Bar Weight ({settings.unit})</Label>
               <View className="flex-row items-center gap-4 mt-2 justify-center">
                 <Button 
                   variant="outline" 
@@ -1279,7 +1376,9 @@ export default function Settings() {
               <View className="gap-3 mt-2">
                 {Object.entries(inventory.plates).map(([weight, count]) => (
                   <View key={weight} className="flex-row items-center justify-between">
-                    <Text className="font-medium text-foreground">{weight} lbs</Text>
+                    <Text className="font-medium text-foreground">
+                      {settings.unit === 'kg' ? convert.toKg(Number(weight)) : Number(weight)} {settings.unit}
+                    </Text>
                     <View className="flex-row items-center gap-3">
                       <Button 
                         variant="outline" 
@@ -1340,7 +1439,7 @@ export default function Settings() {
             <View className="gap-2">
               {blacklist.map((exercise) => (
                 <View key={exercise} className="flex-row items-center justify-between p-3 rounded-lg bg-destructive/10 border border-destructive/20">
-                  <Text className="text-foreground">{exercise}</Text>
+                  <Text className="text-foreground">{formatExerciseDisplayName(exercise)}</Text>
                   <Pressable 
                     onPress={() => removeBlacklistedExercise(exercise)}
                     style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
@@ -1442,10 +1541,10 @@ export default function Settings() {
               <Label className="mb-2">Category</Label>
               <View className="flex-row gap-2 flex-wrap">
                 {[
-                  { value: 'general', label: '💬 General' },
-                  { value: 'bug', label: '🐛 Bug Report' },
-                  { value: 'feature', label: '✨ Feature' },
-                  { value: 'support', label: '🆘 Support' },
+                  { value: 'general', label: 'General' },
+                  { value: 'bug', label: 'Bug Report' },
+                  { value: 'feature', label: 'Feature' },
+                  { value: 'support', label: 'Support' },
                 ].map((cat) => (
                   <Pressable
                     key={cat.value}
@@ -1537,3 +1636,4 @@ export default function Settings() {
     </SafeAreaView>
   );
 }
+

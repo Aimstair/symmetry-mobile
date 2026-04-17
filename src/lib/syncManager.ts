@@ -13,13 +13,21 @@ import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 import { storageAdapter } from './storage';
 import { supabase, checkSupabaseConnection } from '@/lib/supabase';
 import { addBreadcrumb } from '@/lib/monitoring';
-import type { WorkoutPlan, WorkoutSession, PhysiqueScan, User } from '@/types';
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
 export type SyncOperation = 'INSERT' | 'UPDATE' | 'DELETE';
+
+export type SyncPriority = 'critical' | 'high' | 'normal' | 'low';
+
+export interface QueueOperationOptions {
+  priority?: SyncPriority;
+  clientUpdatedAt?: Date | string | number;
+  immediate?: boolean;
+  conflictTarget?: string;
+}
 
 export interface PendingSyncItem {
   id: string;
@@ -28,16 +36,27 @@ export interface PendingSyncItem {
   recordId: string;
   payload: any;
   createdAt: Date;
+  priority: SyncPriority;
+  clientUpdatedAt?: number;
+  conflictTarget?: string;
   attempts: number;
   lastError?: string;
   requiresManualRetry?: boolean; // Dead Letter Queue flag
   nextRetryAt?: number; // Timestamp for next retry
 }
 
+export interface SyncPendingByPriority {
+  critical: number;
+  high: number;
+  normal: number;
+  low: number;
+}
+
 export interface SyncStatus {
   isOnline: boolean;
   isSyncing: boolean;
   pendingCount: number;
+  pendingByPriority: SyncPendingByPriority;
   lastSyncedAt: Date | null;
   lastError: string | null;
 }
@@ -60,13 +79,26 @@ class OfflineSyncManager {
   private isOnline: boolean = true;
   private isSyncing: boolean = false;
   private pendingQueue: PendingSyncItem[] = [];
+  private lastSyncedAt: Date | null = null;
   private listeners: Set<(status: SyncStatus) => void> = new Set();
   private unsubscribeNetInfo: (() => void) | null = null;
   private syncInterval: ReturnType<typeof setInterval> | null = null;
   private backoffTimeouts: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private syncTriggerTimeout: ReturnType<typeof setTimeout> | null = null;
   
   // Maximum retry attempts before moving to Dead Letter Queue
   private static readonly MAX_RETRY_ATTEMPTS = 10;
+  private static readonly PERIODIC_SYNC_INTERVAL_MS = 5000;
+  private static readonly RECONNECT_SYNC_DEBOUNCE_MS = 1500;
+  private static readonly FOLLOW_UP_SYNC_DEBOUNCE_MS = 300;
+  private static readonly MAX_SYNC_ITEMS_PER_CYCLE = 40;
+
+  private static readonly PRIORITY_WEIGHT: Record<SyncPriority, number> = {
+    critical: 0,
+    high: 1,
+    normal: 2,
+    low: 3,
+  };
 
   /**
    * Calculate exponential backoff delay
@@ -76,6 +108,79 @@ class OfflineSyncManager {
     const baseDelay = Math.pow(2, attempts) * 1000;
     const jitter = Math.random() * 1000;
     return Math.min(30000, baseDelay + jitter);
+  }
+
+  private toTimestamp(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return value.getTime();
+    }
+
+    if (typeof value === 'string') {
+      const parsed = new Date(value);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed.getTime();
+      }
+    }
+
+    return undefined;
+  }
+
+  private getPriorityForTable(tableName: string): SyncPriority {
+    if (tableName === 'workout_sessions' || tableName === 'session_exercises' || tableName === 'session_sets') {
+      return 'critical';
+    }
+
+    if (tableName === 'workout_plans' || tableName === 'workout_days' || tableName === 'plan_exercises' || tableName === 'workout_schedule') {
+      return 'high';
+    }
+
+    if (tableName === 'users' || tableName === 'nutrition_targets' || tableName === 'equipment_profiles' || tableName === 'training_days_history' || tableName === 'measurement_logs' || tableName === 'physique_scans' || tableName === 'cardio_logs') {
+      return 'normal';
+    }
+
+    return 'low';
+  }
+
+  private getPendingByPriority(): SyncPendingByPriority {
+    const counts: SyncPendingByPriority = {
+      critical: 0,
+      high: 0,
+      normal: 0,
+      low: 0,
+    };
+
+    for (const item of this.pendingQueue) {
+      counts[item.priority] += 1;
+    }
+
+    return counts;
+  }
+
+  private scheduleSyncTrigger(debounceMs: number = 0): void {
+    if (!this.isOnline) {
+      return;
+    }
+
+    if (this.syncTriggerTimeout) {
+      clearTimeout(this.syncTriggerTimeout);
+      this.syncTriggerTimeout = null;
+    }
+
+    if (debounceMs <= 0) {
+      void this.syncPendingItems();
+      return;
+    }
+
+    this.syncTriggerTimeout = setTimeout(() => {
+      this.syncTriggerTimeout = null;
+      if (this.isOnline) {
+        void this.syncPendingItems();
+      }
+    }, debounceMs);
   }
 
   constructor() {
@@ -101,9 +206,26 @@ class OfflineSyncManager {
    */
   private async loadPendingQueue() {
     try {
-      const stored = storageAdapter.getItem(SYNC_KEYS.PENDING_QUEUE);
-      if (stored) {
-        this.pendingQueue = JSON.parse(stored);
+      const stored = await storageAdapter.getItem(SYNC_KEYS.PENDING_QUEUE);
+      if (typeof stored === 'string' && stored.length > 0) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this.pendingQueue = parsed.map((item) => ({
+            ...item,
+            createdAt: item?.createdAt ? new Date(item.createdAt) : new Date(),
+            priority: item?.priority || this.getPriorityForTable(item?.tableName || ''),
+            clientUpdatedAt: this.toTimestamp(item?.clientUpdatedAt),
+            conflictTarget: typeof item?.conflictTarget === 'string' && item.conflictTarget.trim().length > 0
+              ? item.conflictTarget
+              : undefined,
+          }));
+        }
+      }
+
+      const lastSynced = await storageAdapter.getItem(SYNC_KEYS.LAST_SYNCED);
+      if (typeof lastSynced === 'string' && lastSynced.length > 0) {
+        const parsedDate = new Date(lastSynced);
+        this.lastSyncedAt = Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
       }
     } catch (error) {
       if (__DEV__) {
@@ -117,7 +239,7 @@ class OfflineSyncManager {
    */
   private savePendingQueue() {
     try {
-      storageAdapter.setItem(SYNC_KEYS.PENDING_QUEUE, JSON.stringify(this.pendingQueue));
+      void storageAdapter.setItem(SYNC_KEYS.PENDING_QUEUE, JSON.stringify(this.pendingQueue));
     } catch (error) {
       if (__DEV__) {
         console.error('Failed to save sync queue:', error);
@@ -139,7 +261,12 @@ class OfflineSyncManager {
       
       // If we just came online, trigger sync
       if (wasOffline && this.isOnline) {
-        this.syncPendingItems();
+        this.scheduleSyncTrigger(OfflineSyncManager.RECONNECT_SYNC_DEBOUNCE_MS);
+      }
+
+      if (!this.isOnline && this.syncTriggerTimeout) {
+        clearTimeout(this.syncTriggerTimeout);
+        this.syncTriggerTimeout = null;
       }
       
       this.notifyListeners();
@@ -154,9 +281,9 @@ class OfflineSyncManager {
     // Check every 5 seconds for items ready to sync
     this.syncInterval = setInterval(() => {
       if (this.isOnline && this.hasRetryableItems()) {
-        this.syncPendingItems();
+        this.scheduleSyncTrigger();
       }
-    }, 5000);
+    }, OfflineSyncManager.PERIODIC_SYNC_INTERVAL_MS);
   }
 
   /**
@@ -191,7 +318,7 @@ class OfflineSyncManager {
     const timeout = setTimeout(() => {
       this.backoffTimeouts.delete(item.id);
       if (this.isOnline) {
-        this.syncPendingItems();
+        this.scheduleSyncTrigger();
       }
     }, backoffDelay);
 
@@ -205,7 +332,8 @@ class OfflineSyncManager {
     operation: SyncOperation,
     tableName: string,
     recordId: string,
-    payload: any
+    payload: any,
+    options: QueueOperationOptions = {}
   ): Promise<void> {
     // Add breadcrumb for debugging
     addBreadcrumb(`Queuing ${operation} on ${tableName}`, 'sync', {
@@ -221,6 +349,9 @@ class OfflineSyncManager {
       recordId,
       payload,
       createdAt: new Date(),
+      priority: options.priority || this.getPriorityForTable(tableName),
+      clientUpdatedAt: this.toTimestamp(options.clientUpdatedAt),
+      conflictTarget: options.conflictTarget,
       attempts: 0,
     };
     
@@ -240,8 +371,8 @@ class OfflineSyncManager {
     this.notifyListeners();
     
     // Try immediate sync if online
-    if (this.isOnline) {
-      this.syncPendingItems();
+    if (this.isOnline && options.immediate !== false) {
+      this.scheduleSyncTrigger();
     }
   }
 
@@ -257,19 +388,31 @@ class OfflineSyncManager {
     
     // Filter out items that aren't ready for sync
     const now = Date.now();
-    const itemsToSync = this.pendingQueue.filter(
+    const retryableItems = this.pendingQueue.filter(
       item => !item.requiresManualRetry && 
               (!item.nextRetryAt || item.nextRetryAt <= now)
     );
     
-    if (itemsToSync.length === 0) {
+    if (retryableItems.length === 0) {
       return { success: 0, failed: 0 };
     }
+
+    const itemsToSync = retryableItems
+      .sort((a, b) => {
+        const priorityDiff = OfflineSyncManager.PRIORITY_WEIGHT[a.priority] - OfflineSyncManager.PRIORITY_WEIGHT[b.priority];
+        if (priorityDiff !== 0) {
+          return priorityDiff;
+        }
+
+        return a.createdAt.getTime() - b.createdAt.getTime();
+      })
+      .slice(0, OfflineSyncManager.MAX_SYNC_ITEMS_PER_CYCLE);
     
     // Add breadcrumb for debugging
     addBreadcrumb('Starting sync', 'sync', {
       pendingCount: this.pendingQueue.length,
       syncingCount: itemsToSync.length,
+      readyCount: retryableItems.length,
       dlqCount: this.pendingQueue.filter(i => i.requiresManualRetry).length,
     });
     
@@ -283,7 +426,7 @@ class OfflineSyncManager {
     const batches = new Map<string, PendingSyncItem[]>();
     
     for (const item of itemsToSync) {
-      const key = `${item.tableName}:${item.operation}`;
+      const key = `${item.tableName}:${item.operation}:${item.conflictTarget || 'id'}`;
       if (!batches.has(key)) {
         batches.set(key, []);
       }
@@ -292,7 +435,7 @@ class OfflineSyncManager {
     
     // Process each batch
     for (const [key, items] of batches) {
-      const [tableName, operation] = key.split(':') as [string, SyncOperation];
+      const [tableName, operation, conflictTarget] = key.split(':') as [string, SyncOperation, string];
       
       try {
         if (operation === 'DELETE') {
@@ -312,7 +455,7 @@ class OfflineSyncManager {
           const payloads = items.map((item) => item.payload);
           
           const { error } = await supabase.from(tableName).upsert(payloads, {
-            onConflict: 'id',
+            onConflict: conflictTarget || 'id',
             ignoreDuplicates: false,
           });
           
@@ -354,7 +497,8 @@ class OfflineSyncManager {
     
     // Update last synced timestamp
     if (success > 0) {
-      storageAdapter.setItem(SYNC_KEYS.LAST_SYNCED, new Date().toISOString());
+      this.lastSyncedAt = new Date();
+      void storageAdapter.setItem(SYNC_KEYS.LAST_SYNCED, this.lastSyncedAt.toISOString());
     }
     
     this.isSyncing = false;
@@ -362,6 +506,10 @@ class OfflineSyncManager {
     
     if (__DEV__) {
       console.log(`🔄 Sync complete: ${success} success, ${failed} failed`);
+    }
+
+    if (this.hasRetryableItems()) {
+      this.scheduleSyncTrigger(OfflineSyncManager.FOLLOW_UP_SYNC_DEBOUNCE_MS);
     }
     
     return { success, failed };
@@ -406,13 +554,13 @@ class OfflineSyncManager {
    * Execute a single sync operation
    */
   private async executeSyncOperation(item: PendingSyncItem): Promise<void> {
-    const { operation, tableName, recordId, payload } = item;
+    const { operation, tableName, recordId, payload, conflictTarget } = item;
     
     switch (operation) {
       case 'INSERT': {
         // Use upsert to prevent duplicate key errors on retries
         const { error } = await supabase.from(tableName).upsert(payload, {
-          onConflict: 'id',
+          onConflict: conflictTarget || 'id',
           ignoreDuplicates: false,
         });
         if (error) throw error;
@@ -421,7 +569,7 @@ class OfflineSyncManager {
       case 'UPDATE': {
         // Use upsert for updates too - more resilient to race conditions
         const { error } = await supabase.from(tableName).upsert(payload, {
-          onConflict: 'id',
+          onConflict: conflictTarget || 'id',
           ignoreDuplicates: false,
         });
         if (error) throw error;
@@ -439,13 +587,12 @@ class OfflineSyncManager {
    * Get current sync status
    */
   getStatus(): SyncStatus {
-    const lastSyncedStr = storageAdapter.getItem(SYNC_KEYS.LAST_SYNCED);
-    
     return {
       isOnline: this.isOnline,
       isSyncing: this.isSyncing,
       pendingCount: this.pendingQueue.length,
-      lastSyncedAt: lastSyncedStr ? new Date(lastSyncedStr) : null,
+      pendingByPriority: this.getPendingByPriority(),
+      lastSyncedAt: this.lastSyncedAt,
       lastError: this.pendingQueue[0]?.lastError || null,
     };
   }
@@ -532,7 +679,7 @@ class OfflineSyncManager {
       }
       
       if (this.isOnline) {
-        this.syncPendingItems();
+        this.scheduleSyncTrigger();
       }
     }
   }
@@ -563,6 +710,10 @@ class OfflineSyncManager {
     }
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
+    }
+    if (this.syncTriggerTimeout) {
+      clearTimeout(this.syncTriggerTimeout);
+      this.syncTriggerTimeout = null;
     }
     // Clear all backoff timeouts
     this.backoffTimeouts.forEach(timeout => clearTimeout(timeout));

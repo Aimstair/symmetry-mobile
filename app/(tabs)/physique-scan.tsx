@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { View, Text, ScrollView, Animated, ActivityIndicator, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View, Text, ScrollView, Animated, ActivityIndicator } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import * as Crypto from 'expo-crypto';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -10,6 +10,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/store/useAppStore';
 import { useProgressDataInitialization } from '@/hooks/useDataInitialization';
+import { useConsumeSessionAnimation } from '@/hooks/useSessionAnimationGate';
 import { generatePlanFromScan } from '@/utils/aiPlanner';
 import { initializeExerciseLookup } from '@/hooks/useExercises';
 import { supabase } from '@/lib/supabase';
@@ -26,10 +27,14 @@ import {
   ArrowDown,
   ArrowUp
 } from 'lucide-react-native';
-import { cn } from '@/lib/utils';
+import { showAppAlert } from '@/store/useAlertStore';
+import { cn, DEFAULT_FRESHNESS_WINDOW_MS, isAbortError, isStaleTimestamp } from '@/lib/utils';
 import type { PhysiqueScan as PhysiqueScanType } from '@/types';
 
 type ScanPhase = 'idle' | 'scanning' | 'analyzing' | 'results';
+const SCAN_CAPTURE_DELAY_MS = 700;
+const SCAN_STEP_DELAY_MS = 650;
+const SCAN_RESULTS_DELAY_MS = 250;
 
 // Helper to format dates
 function formatScanDate(date: Date | string): string {
@@ -65,6 +70,7 @@ function transformMuscleResults(scan: PhysiqueScanType | null) {
 
 export default function PhysiqueScan() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const netInfo = useNetInfo();
   const isConnected = netInfo.isConnected ?? false;
   
@@ -78,10 +84,16 @@ export default function PhysiqueScan() {
   const headerAnim = useRef(new Animated.Value(0)).current;
   const mainCardAnim = useRef(new Animated.Value(0)).current;
   const historyAnim = useRef(new Animated.Value(0)).current;
+  const animationInFlightRef = useRef<Animated.CompositeAnimation | null>(null);
+  const consumeEntryAnimation = useConsumeSessionAnimation('tabs-physique-scan');
+  const scanTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const scanRunIdRef = useRef(0);
+  const lastQuotaCheckAtRef = useRef(0);
 
   // Get user and data from store
   const user = useAppStore((s) => s.user);
   const isPro = useAppStore((s) => s.isPro);
+  const notificationsEnabledForUpdates = useAppStore((s) => s.settings.notifications.progressUpdates);
   const physiqueScans = useAppStore((s) => s.physiqueScans);
   const workoutPlans = useAppStore((s) => s.workoutPlans);
   const workoutHistory = useAppStore((s) => s.workoutHistory);
@@ -111,37 +123,15 @@ export default function PhysiqueScan() {
     [currentScanResult, latestScan]
   );
 
-  useFocusEffect(
-    useCallback(() => {
-      loadProgressData();
-      checkScanQuota(); // Check quota on focus
-      
-      headerAnim.setValue(0);
-      mainCardAnim.setValue(0);
-      historyAnim.setValue(0);
-      if (phase === 'idle' || phase === 'results') {
-        const animation =Animated.stagger(100, [
-          Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-          Animated.timing(mainCardAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-          Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-        ]);
-        animation.start();
-
-        return () => {
-        animation.stop();
-        }
-      }
-    }, [phase, headerAnim, mainCardAnim, historyAnim, loadProgressData])
-  );
-
   /**
    * Check if user can perform a scan based on their subscription tier
    * Tier is determined SERVER-SIDE to prevent client manipulation
    * Free users: 1 scan per 30 days
    * Pro users: 1 scan per 7 days
    */
-  const checkScanQuota = async () => {
-    if (!user?.id) {
+  const checkScanQuota = useCallback(async () => {
+    // Skip network call for guests - Supabase expects a valid UUID, not 'guest-xxx'
+    if (!user?.id || user.id.startsWith('guest-')) {
       setCanScan(false);
       return;
     }
@@ -199,12 +189,27 @@ export default function PhysiqueScan() {
         useAppStore.getState().setNextScanDate(nextDate);
       }
     } catch (error) {
-      if (__DEV__) console.error('Error checking scan quota:', error);
-      setCanScan(true); // Fail open
+      if (!isAbortError(error)) {
+        if (__DEV__) console.error('Error checking scan quota:', error);
+        setCanScan(true); // Fail open
+      }
     } finally {
       setIsCheckingQuota(false);
     }
-  };
+  }, [user?.id, isConnected]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadProgressData({ staleMs: DEFAULT_FRESHNESS_WINDOW_MS });
+
+      if (isStaleTimestamp(lastQuotaCheckAtRef.current, DEFAULT_FRESHNESS_WINDOW_MS)) {
+        checkScanQuota(); // Check quota on focus (stale-gated)
+        lastQuotaCheckAtRef.current = Date.now();
+      }
+
+      return undefined;
+    }, [loadProgressData, checkScanQuota])
+  );
 
   /**
    * Log a completed scan to the database for quota tracking
@@ -219,10 +224,14 @@ export default function PhysiqueScan() {
       });
       
       if (error) {
-        console.error('Failed to log scan:', error);
+        if (!isAbortError(error)) {
+          console.error('Failed to log scan:', error);
+        }
       }
     } catch (error) {
-      console.error('Error logging scan:', error);
+      if (!isAbortError(error)) {
+        console.error('Error logging scan:', error);
+      }
     }
   };
 
@@ -249,7 +258,7 @@ export default function PhysiqueScan() {
   const canPerformScan = (): boolean => {
     // Check network connectivity first - AI analysis requires internet
     if (!isConnected) {
-      Alert.alert(
+      showAppAlert(
         'No Internet Connection',
         'Internet is required for AI analysis. Please check your connection and try again.',
         [{ text: 'OK' }]
@@ -263,8 +272,12 @@ export default function PhysiqueScan() {
     if (!canScan) {
       const tierName = isPro ? 'Pro' : 'Free';
       const frequency = isPro ? 'once per week' : 'once per month';
+
+      if (!isPro && notificationsEnabledForUpdates) {
+        void notificationService.maybeScheduleProUpsellNotification('scan_locked');
+      }
       
-      Alert.alert(
+      showAppAlert(
         'Scan Limit Reached',
         isPro
           ? `Pro users can scan ${frequency}. Your next scan is available in ${daysUntilNextScan} day${daysUntilNextScan !== 1 ? 's' : ''}.`
@@ -273,7 +286,15 @@ export default function PhysiqueScan() {
           ? [{ text: 'OK' }]
           : [
               { text: 'Maybe Later', style: 'cancel' },
-              { text: 'Upgrade to Pro', onPress: () => router.push('/paywall') },
+              {
+                text: 'Upgrade to Pro',
+                onPress: () => {
+                  if (notificationsEnabledForUpdates) {
+                    void notificationService.maybeScheduleProUpsellNotification('scan_locked');
+                  }
+                  router.push('/paywall');
+                },
+              },
             ]
       );
       return false;
@@ -283,17 +304,48 @@ export default function PhysiqueScan() {
   };
 
   useEffect(() => {
-    headerAnim.setValue(0);
-    mainCardAnim.setValue(0);
-    historyAnim.setValue(0);
+    if (animationInFlightRef.current) {
+      animationInFlightRef.current.stop();
+      animationInFlightRef.current = null;
+    }
+
     if (phase === 'idle' || phase === 'results') {
-      Animated.stagger(100, [
+      const shouldAnimateEntry = consumeEntryAnimation();
+
+      if (!shouldAnimateEntry) {
+        headerAnim.setValue(1);
+        mainCardAnim.setValue(1);
+        historyAnim.setValue(1);
+        return undefined;
+      }
+
+      headerAnim.setValue(0);
+      mainCardAnim.setValue(0);
+      historyAnim.setValue(0);
+
+      const animation = Animated.stagger(100, [
         Animated.timing(headerAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(mainCardAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
         Animated.timing(historyAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-      ]).start();
+      ]);
+
+      animationInFlightRef.current = animation;
+      animation.start(() => {
+        if (animationInFlightRef.current === animation) {
+          animationInFlightRef.current = null;
+        }
+      });
+
+      return () => {
+        animation.stop();
+        if (animationInFlightRef.current === animation) {
+          animationInFlightRef.current = null;
+        }
+      };
     }
-  }, [phase]);
+
+    return undefined;
+  }, [phase, consumeEntryAnimation]);
 
   const createAnimStyle = (anim: Animated.Value) => ({
     opacity: anim,
@@ -306,6 +358,28 @@ export default function PhysiqueScan() {
     'Calculating Symmetry...',
   ];
 
+  const clearScanTimers = useCallback(() => {
+    scanTimersRef.current.forEach((timer) => clearTimeout(timer));
+    scanTimersRef.current = [];
+  }, []);
+
+  const waitForScanDelay = useCallback((ms: number) => {
+    return new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        scanTimersRef.current = scanTimersRef.current.filter((timer) => timer !== timeout);
+        resolve();
+      }, ms);
+      scanTimersRef.current.push(timeout);
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      scanRunIdRef.current += 1;
+      clearScanTimers();
+    };
+  }, [clearScanTimers]);
+
   const startScan = async () => {
     if (!user) return;
     
@@ -313,186 +387,191 @@ export default function PhysiqueScan() {
     if (!canPerformScan()) {
       return;
     }
+
+    clearScanTimers();
+    scanRunIdRef.current += 1;
+    const runId = scanRunIdRef.current;
     
     setPhase('scanning');
     setAnalysisStep(0);
-    
-    // Simulate camera capture
-    setTimeout(() => {
-      setPhase('analyzing');
-      
-      // Run through analysis steps
-      let step = 0;
-      const interval = setInterval(async () => {
-        step++;
-        setAnalysisStep(step);
-        if (step >= analysisSteps.length) {
-          clearInterval(interval);
-          
-          // Generate mock scan results (in production, this would come from AI analysis)
-          const muscleScores = {
-            chest: Math.floor(Math.random() * 25) + 70,
-            back: Math.floor(Math.random() * 25) + 70,
-            shoulders: Math.floor(Math.random() * 25) + 70,
-            arms: Math.floor(Math.random() * 25) + 70,
-            legs: Math.floor(Math.random() * 25) + 70,
-          };
-          
-          const newScan: PhysiqueScanType = {
-            id: Crypto.randomUUID(),
-            userId: user.id,
-            date: new Date(),
-            images: {},
-            muscleScores,
-            symmetryScore: Math.ceil((muscleScores.chest + muscleScores.back + muscleScores.shoulders + muscleScores.arms + muscleScores.legs) / 5), // Average of muscle scores
-            notes: 'AI-generated analysis',
-          };
-          
+
+    await waitForScanDelay(SCAN_CAPTURE_DELAY_MS);
+    if (scanRunIdRef.current !== runId) return;
+
+    setPhase('analyzing');
+
+    for (let step = 1; step <= analysisSteps.length; step += 1) {
+      await waitForScanDelay(SCAN_STEP_DELAY_MS);
+      if (scanRunIdRef.current !== runId) return;
+      setAnalysisStep(step);
+    }
+
+    if (scanRunIdRef.current !== runId) return;
+
+    // Generate mock scan results (in production, this would come from AI analysis)
+    const muscleScores = {
+      chest: Math.floor(Math.random() * 25) + 70,
+      back: Math.floor(Math.random() * 25) + 70,
+      shoulders: Math.floor(Math.random() * 25) + 70,
+      arms: Math.floor(Math.random() * 25) + 70,
+      legs: Math.floor(Math.random() * 25) + 70,
+    };
+
+    const newScan: PhysiqueScanType = {
+      id: Crypto.randomUUID(),
+      userId: user.id,
+      date: new Date(),
+      images: {},
+      muscleScores,
+      symmetryScore: Math.ceil((muscleScores.chest + muscleScores.back + muscleScores.shoulders + muscleScores.arms + muscleScores.legs) / 5),
+      notes: 'AI-generated analysis',
+    };
+
+    // Surface results quickly, then run persistence/plan updates.
+    setCurrentScanResult(newScan);
+    await waitForScanDelay(SCAN_RESULTS_DELAY_MS);
+    if (scanRunIdRef.current !== runId) return;
+    setPhase('results');
+
+    try {
+      const savedScan = await syncAddPhysiqueScan(newScan);
+      if (scanRunIdRef.current !== runId) return;
+
+      setCurrentScanResult(savedScan);
+      await notificationService.scheduleAiCompletionFallback({
+        scanId: savedScan.id,
+        delaySeconds: 1,
+      });
+
+      // Log scan usage for quota tracking (after successful save)
+      await logScanUsage();
+
+      // Refresh quota status
+      await checkScanQuota();
+      lastQuotaCheckAtRef.current = Date.now();
+
+      // Schedule notification for next scan availability
+      const nextScanDate = useAppStore.getState().nextScanDate;
+      if (nextScanDate) {
+        await notificationService.scheduleScanAvailability(new Date(nextScanDate));
+      }
+
+      try {
+        // Initialize exercise cache before generating plan
+        await initializeExerciseLookup();
+
+        const aiPlan = generatePlanFromScan(savedScan, new Date(), {
+          user,
+        });
+
+        // Check if a workout plan already exists
+        const existingPlan = workoutPlans.length > 0 ? workoutPlans[0] : null;
+
+        if (existingPlan) {
+          // Update the existing plan with new workout days from the AI-generated plan
+          // Keep the existing plan's ID and metadata, but preserve completed days
+          let mergedWorkoutDays = aiPlan.workoutDays;
+
+          // Try to preserve completed workouts if workoutHistory is available
           try {
-            const savedScan = await syncAddPhysiqueScan(newScan);
-            setCurrentScanResult(savedScan);
-            
-            // Log scan usage for quota tracking (after successful save)
-            await logScanUsage();
-            
-            // Refresh quota status
-            await checkScanQuota();
-            
-            // Schedule notification for next scan availability
-            const nextScanDate = useAppStore.getState().nextScanDate;
-            if (nextScanDate) {
-              await notificationService.scheduleScanAvailability(new Date(nextScanDate));
-            }
+            if (workoutHistory && Array.isArray(workoutHistory) && workoutHistory.length > 0) {
+              // Get completed dates to avoid overwriting finished workouts
+              const today = new Date();
+              const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+              const completedDatesSet = new Set<string>();
 
-            // Generate AI workout plan from scan results
-            if (user) {
-              try {
-                // Initialize exercise cache before generating plan
-                await initializeExerciseLookup();
-                
-                const aiPlan = generatePlanFromScan(savedScan, new Date(), {
-                  user,
-                });
-
-                // Check if a workout plan already exists
-                const existingPlan = workoutPlans.length > 0 ? workoutPlans[0] : null;
-                
-                if (existingPlan) {
-                  // Update the existing plan with new workout days from the AI-generated plan
-                  // Keep the existing plan's ID and metadata, but preserve completed days
-                  
-                  let mergedWorkoutDays = aiPlan.workoutDays;
-                  
-                  // Try to preserve completed workouts if workoutHistory is available
-                  try {
-                    if (workoutHistory && Array.isArray(workoutHistory) && workoutHistory.length > 0) {
-                      // Get completed dates to avoid overwriting finished workouts
-                      const today = new Date();
-                      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-                      const completedDatesSet = new Set<string>();
-                      
-                      workoutHistory.forEach((session: any) => {
-                        if (session.startedAt) {
-                          const date = new Date(session.startedAt);
-                          const year = date.getFullYear();
-                          const month = String(date.getMonth() + 1).padStart(2, '0');
-                          const day = String(date.getDate()).padStart(2, '0');
-                          const dateStr = `${year}-${month}-${day}`;
-                          completedDatesSet.add(dateStr);
-                        }
-                      });
-                      
-                      // Merge workout days: keep existing days that are completed, use new AI days for others
-                      mergedWorkoutDays = aiPlan.workoutDays.map(newDay => {
-                        // Check if this day is today and if today is completed
-                        const dayIndex = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(newDay.dayName || '');
-                        const isToday = dayIndex === today.getDay();
-                        const isTodayCompleted = completedDatesSet.has(todayStr);
-                        
-                        // If this is today and it's completed, keep the existing workout day
-                        if (isToday && isTodayCompleted) {
-                          const existingDay = existingPlan.workoutDays?.find(d => d.dayName === newDay.dayName);
-                          if (existingDay) {
-                            if (__DEV__) console.log('🔒 Preserving completed workout for today');
-                            return existingDay; // Preserve completed workout
-                          }
-                        }
-                        
-                        // Otherwise, use the new AI-generated day
-                        return newDay;
-                      });
-                    }
-                  } catch (error) {
-                    if (__DEV__) console.warn('⚠️ Could not preserve completed workouts:', error);
-                    // If there's an error, just use the AI-generated days without merging
-                    mergedWorkoutDays = aiPlan.workoutDays;
-                  }
-                  
-                  const updatedPlan = {
-                    ...aiPlan,
-                    id: existingPlan.id, // Keep the same ID
-                    createdAt: existingPlan.createdAt, // Keep original creation date
-                    updatedAt: new Date(), // Update timestamp
-                    workoutDays: mergedWorkoutDays, // Use merged days
-                  };
-                  
-                  await syncUpdateWorkoutPlanToCloud(existingPlan.id, {
-                    name: updatedPlan.name,
-                    description: updatedPlan.description,
-                    type: updatedPlan.type,
-                    daysPerWeek: updatedPlan.daysPerWeek,
-                    workoutDays: updatedPlan.workoutDays,
-                  });
-                  
-                  // Update local state
-                  updateWorkoutPlan(existingPlan.id, {
-                    name: updatedPlan.name,
-                    description: updatedPlan.description,
-                    type: updatedPlan.type,
-                    daysPerWeek: updatedPlan.daysPerWeek,
-                    workoutDays: updatedPlan.workoutDays,
-                  });
-                  
-                  console.log('✅ Existing workout plan updated from new scan:', existingPlan.id);
-                  
-                  setTimeout(() => {
-                    Alert.alert(
-                      'Workout Plan Updated!',
-                      'Your existing workout plan has been updated based on your new scan results. Check the Workout Plan tab to view changes.',
-                      [{ text: 'OK' }]
-                    );
-                  }, 1000);
-                } else {
-                  // No existing plan, create a new one
-                  await syncWorkoutPlanToCloud(aiPlan);
-                  addWorkoutPlan(aiPlan);
-
-                  console.log('✅ New AI workout plan generated and saved:', aiPlan.id);
-
-                  setTimeout(() => {
-                    Alert.alert(
-                      'Workout Plan Generated!',
-                      'A new workout plan has been created based on your scan results. Check the Workout Plan tab to view it.',
-                      [{ text: 'OK' }]
-                    );
-                  }, 1000);
+              workoutHistory.forEach((session: any) => {
+                if (session.startedAt) {
+                  const date = new Date(session.startedAt);
+                  const year = date.getFullYear();
+                  const month = String(date.getMonth() + 1).padStart(2, '0');
+                  const day = String(date.getDate()).padStart(2, '0');
+                  const dateStr = `${year}-${month}-${day}`;
+                  completedDatesSet.add(dateStr);
                 }
-              } catch (planError) {
-                console.error('❌ Failed to generate AI plan:', planError);
-                // Still show scan results even if plan generation fails
-              }
+              });
+
+              // Merge workout days: keep existing days that are completed, use new AI days for others
+              mergedWorkoutDays = aiPlan.workoutDays.map((newDay) => {
+                // Check if this day is today and if today is completed
+                const dayIndex = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].indexOf(newDay.dayName || '');
+                const isToday = dayIndex === today.getDay();
+                const isTodayCompleted = completedDatesSet.has(todayStr);
+
+                // If this is today and it's completed, keep the existing workout day
+                if (isToday && isTodayCompleted) {
+                  const existingDay = existingPlan.workoutDays?.find((d) => d.dayName === newDay.dayName);
+                  if (existingDay) {
+                    if (__DEV__) console.log('ðŸ”’ Preserving completed workout for today');
+                    return existingDay; // Preserve completed workout
+                  }
+                }
+
+                // Otherwise, use the new AI-generated day
+                return newDay;
+              });
             }
           } catch (error) {
-            console.error('Failed to save scan:', error);
-            setCurrentScanResult(newScan); // Still show results even if save failed
+            if (__DEV__) console.warn('âš ï¸ Could not preserve completed workouts:', error);
+            // If there's an error, just use the AI-generated days without merging
+            mergedWorkoutDays = aiPlan.workoutDays;
           }
-          
-          setTimeout(() => {
-            setPhase('results');
-          }, 500);
+
+          const updatedPlan = {
+            ...aiPlan,
+            id: existingPlan.id, // Keep the same ID
+            createdAt: existingPlan.createdAt, // Keep original creation date
+            updatedAt: new Date(), // Update timestamp
+            workoutDays: mergedWorkoutDays, // Use merged days
+          };
+
+          await syncUpdateWorkoutPlanToCloud(existingPlan.id, {
+            name: updatedPlan.name,
+            description: updatedPlan.description,
+            type: updatedPlan.type,
+            daysPerWeek: updatedPlan.daysPerWeek,
+            workoutDays: updatedPlan.workoutDays,
+          });
+
+          // Update local state
+          updateWorkoutPlan(existingPlan.id, {
+            name: updatedPlan.name,
+            description: updatedPlan.description,
+            type: updatedPlan.type,
+            daysPerWeek: updatedPlan.daysPerWeek,
+            workoutDays: updatedPlan.workoutDays,
+          });
+
+          console.log('âœ… Existing workout plan updated from new scan:', existingPlan.id);
+
+          showAppAlert(
+            'Workout Plan Updated!',
+            'Your existing workout plan has been updated based on your new scan results. Check the Workout Plan tab to view changes.',
+            [{ text: 'OK' }]
+          );
+        } else {
+          // No existing plan, create a new one
+          await syncWorkoutPlanToCloud(aiPlan);
+          addWorkoutPlan(aiPlan);
+
+          console.log('âœ… New AI workout plan generated and saved:', aiPlan.id);
+
+          showAppAlert(
+            'Workout Plan Generated!',
+            'A new workout plan has been created based on your scan results. Check the Workout Plan tab to view it.',
+            [{ text: 'OK' }]
+          );
         }
-      }, 2000);
-    }, 2000);
+      } catch (planError) {
+        console.error('âŒ Failed to generate AI plan:', planError);
+        // Still show scan results even if plan generation fails
+      }
+    } catch (error) {
+      if (!isAbortError(error)) {
+        console.error('Failed to save scan:', error);
+      }
+      setCurrentScanResult(newScan); // Still show results even if save failed
+    }
   };
 
   const getStatusColor = (status: string) => {
@@ -516,7 +595,7 @@ export default function PhysiqueScan() {
   return (
     <SafeAreaView edges={['top']} className="flex-1 bg-background">
       <ScrollView className="flex-1">
-        <View className="px-4 py-6">
+        <View className="px-4">
           {/* Idle State */}
           {phase === 'idle' && (
             <View>
@@ -569,15 +648,27 @@ export default function PhysiqueScan() {
                 )}
 
                 <Button 
-                  onPress={startScan}
-                  className={`w-full mt-4 h-12 ${!isConnected || (canScan === false) ? 'bg-muted' : 'bg-primary'}`}
-                  disabled={!isConnected || canScan === false || isCheckingQuota}
+                  onPress={(!isPro && canScan === false) ? () => {
+                    if (notificationsEnabledForUpdates) {
+                      void notificationService.maybeScheduleProUpsellNotification('scan_locked');
+                    }
+                    router.push('/paywall');
+                  } : startScan}
+                  className={`w-full mt-4 h-12 ${!isConnected || (canScan === false && isPro) ? 'bg-muted' : 'bg-primary'}`}
+                  disabled={!isConnected || isCheckingQuota || (canScan === false && isPro)}
                 >
                   {isCheckingQuota ? (
                     <>
                       <ActivityIndicator size="small" color="#FFFFFF" />
                       <Text className="text-primary-foreground font-semibold ml-2">
                         Checking...
+                      </Text>
+                    </>
+                  ) : (!isPro && canScan === false) ? (
+                    <>
+                      <Sparkles size={20} color="#000000" />
+                      <Text className="text-primary-foreground font-bold ml-2">
+                        Upgrade to Scan Now
                       </Text>
                     </>
                   ) : (
@@ -704,7 +795,7 @@ export default function PhysiqueScan() {
                       analysisStep < i && 'text-muted-foreground opacity-30'
                     )}
                   >
-                    {analysisStep > i && '✓ '}{step}
+                    {analysisStep > i && 'OK '}{step}
                   </Text>
                 ))}
               </View>
@@ -852,3 +943,5 @@ export default function PhysiqueScan() {
     </SafeAreaView>
   );
 }
+
+
